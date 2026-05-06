@@ -1,0 +1,17 @@
+{
+  "name": "nutricare",
+  "version": "1.1.0",
+  "private": true,
+  "description": "NutriCare - Sistema de Consulta Nutricional",
+  "scripts": {
+    "dev": "concurrently -n \"API,WEB\" -c \"green,blue\" \"npm run dev:back\" \"npm run dev:front\"",
+    "dev:front": "npx serve -s . -l 3000 --cors",
+    "dev:back": "node server/server.js",
+    "start": "node server/server.js",
+    "install:all": "npm install && cd server && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "serve": "^14.2.6"
+  }
+}
