@@ -1672,3 +1672,258 @@ h1 {
     align-items: center;
     padding: 8px 0;
 }
+
+/* ====== NUTRITION CHARTS ====== */
+.charts-header {
+    text-align: center;
+    margin-bottom: 24px;
+    padding-top: 16px;
+}
+
+.charts-subtitle {
+    color: var(--gray-500);
+    font-size: 0.9rem;
+    margin-top: 4px;
+}
+
+.nutrition-summary {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.summary-item {
+    background: var(--white);
+    border: 1px solid var(--green-200);
+    border-radius: var(--radius-md);
+    padding: 16px 8px;
+    text-align: center;
+    transition: transform var(--transition), box-shadow var(--transition);
+}
+
+.summary-item:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+}
+
+.summary-value {
+    display: block;
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--green-700);
+    line-height: 1.2;
+}
+
+.summary-label {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--gray-500);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.chart-card {
+    background: var(--white);
+    border: 1px solid var(--gray-200);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: var(--shadow-sm);
+}
+
+.chart-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--gray-900);
+    margin-bottom: 4px;
+}
+
+.chart-desc {
+    font-size: 0.85rem;
+    color: var(--gray-500);
+    margin-bottom: 20px;
+}
+
+.chart-container {
+    position: relative;
+    height: 220px;
+    width: 100%;
+}
+
+.chart-container-doughnut {
+    height: 240px;
+    max-width: 280px;
+    margin: 0 auto;
+}
+
+.chart-legend-meals {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--gray-100);
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.82rem;
+}
+
+.legend-color {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+
+.legend-label {
+    color: var(--gray-700);
+    flex: 1;
+}
+
+.legend-value {
+    font-weight: 700;
+    color: var(--gray-900);
+    font-size: 0.8rem;
+}
+
+/* Macro Details */
+.macro-details {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--gray-100);
+}
+
+.macro-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    font-size: 0.85rem;
+}
+
+.macro-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.macro-protein .macro-dot { background: #22C55E; }
+.macro-carbs .macro-dot { background: #F59E0B; }
+.macro-fat .macro-dot { background: #EF4444; }
+
+.macro-name {
+    width: 95px;
+    color: var(--gray-700);
+    font-weight: 500;
+    flex-shrink: 0;
+}
+
+.macro-bar {
+    flex: 1;
+    height: 8px;
+    background: var(--gray-100);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.macro-bar span {
+    display: block;
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.8s ease;
+}
+
+.macro-pct {
+    width: 36px;
+    text-align: right;
+    font-weight: 700;
+    color: var(--gray-800);
+    font-size: 0.85rem;
+}
+
+.macro-grams {
+    width: 50px;
+    text-align: right;
+    color: var(--gray-500);
+    font-size: 0.8rem;
+}
+
+/* Day Timeline */
+.day-timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.timeline-item {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+}
+
+.timeline-icon {
+    font-size: 1.4rem;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--green-50);
+    border-radius: 10px;
+    flex-shrink: 0;
+}
+
+.timeline-content {
+    flex: 1;
+}
+
+.timeline-name {
+    font-weight: 600;
+    font-size: 0.88rem;
+    color: var(--gray-800);
+    margin-bottom: 6px;
+}
+
+.timeline-track {
+    height: 10px;
+    background: var(--gray-100);
+    border-radius: 5px;
+    overflow: hidden;
+}
+
+.timeline-fill {
+    height: 100%;
+    border-radius: 5px;
+    transition: width 1s ease;
+}
+
+.timeline-stats {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--gray-500);
+    margin-top: 4px;
+}
+
+@media (max-width: 480px) {
+    .nutrition-summary {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    .chart-legend-meals {
+        grid-template-columns: 1fr;
+    }
+    .summary-value {
+        font-size: 1.2rem;
+    }
+    .macro-name {
+        width: 80px;
+        font-size: 0.8rem;
+    }
+}

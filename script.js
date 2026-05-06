@@ -221,6 +221,7 @@ function engine(action, payload) {
           { type: 'buttons', items: [
             { text: '🔄 Ver substituições', action: 'ver_subs', variant: 'secondary' },
             { text: '🛒 Gerar lista de compras', action: 'ver_lista', variant: 'secondary' },
+            { text: '📊 Gráficos nutricionais', action: 'ver_graficos', variant: 'secondary' },
             { text: '💡 Estratégias', action: 'ver_estrategias', variant: 'outline' },
             { text: '💊 Suplementação', action: 'ver_suplementacao', variant: 'outline' }
           ]}
@@ -228,10 +229,25 @@ function engine(action, payload) {
         actions: [
           { id: 'ver_subs', next: 'substituicoes' },
           { id: 'ver_lista', next: 'lista_compras' },
+          { id: 'ver_graficos', next: 'nutrition_charts' },
           { id: 'ver_estrategias', next: 'estrategias' },
           { id: 'ver_suplementacao', next: 'suplementacao' },
           { id: 'voltar_analise', next: 'analise' }
         ]
+      };
+    }
+
+    // ============================
+    case 'nutrition_charts': {
+      const nd = gerarDadosNutricionais(STATE.profile);
+      return {
+        screen: 'nutrition_charts',
+        message: '',
+        components: [
+          { type: 'nutrition_charts', data: nd },
+          { type: 'button', text: '← Voltar ao plano alimentar', action: 'voltar_plano', variant: 'primary' }
+        ],
+        actions: [{ id: 'voltar_plano', next: 'plano' }]
       };
     }
 
@@ -595,6 +611,61 @@ function gerarDicas(p) {
   return tips;
 }
 
+// ---- Dados Nutricionais para Gráficos ----
+function gerarDadosNutricionais(p) {
+  const isLoss = p.goal && p.goal.includes('Emagrecimento');
+  const isGain = p.goal && p.goal.includes('massa muscular');
+
+  let totalCal, proteinPct, carbPct, fatPct;
+  if (isLoss) {
+    totalCal = 1500; proteinPct = 40; carbPct = 30; fatPct = 30;
+  } else if (isGain) {
+    totalCal = 2800; proteinPct = 30; carbPct = 45; fatPct = 25;
+  } else {
+    totalCal = 2000; proteinPct = 30; carbPct = 40; fatPct = 30;
+  }
+
+  const proteinG = Math.round((totalCal * proteinPct / 100) / 4);
+  const carbG = Math.round((totalCal * carbPct / 100) / 4);
+  const fatG = Math.round((totalCal * fatPct / 100) / 9);
+
+  // Distribuição de calorias por refeição
+  const mealDist = isLoss
+    ? [
+        { name: 'Café da Manhã', calories: 300, icon: '🌅' },
+        { name: 'Lanche Manhã', calories: 120, icon: '🍎' },
+        { name: 'Almoço', calories: 500, icon: '🍚' },
+        { name: 'Lanche Tarde', calories: 130, icon: '🥤' },
+        { name: 'Jantar', calories: 450, icon: '🌙' }
+      ]
+    : isGain
+      ? [
+          { name: 'Café da Manhã', calories: 550, icon: '🌅' },
+          { name: 'Lanche Manhã', calories: 250, icon: '🍎' },
+          { name: 'Almoço', calories: 850, icon: '🍚' },
+          { name: 'Lanche Tarde', calories: 300, icon: '🥤' },
+          { name: 'Jantar', calories: 850, icon: '🌙' }
+        ]
+      : [
+          { name: 'Café da Manhã', calories: 400, icon: '🌅' },
+          { name: 'Lanche Manhã', calories: 150, icon: '🍎' },
+          { name: 'Almoço', calories: 650, icon: '🍚' },
+          { name: 'Lanche Tarde', calories: 200, icon: '🥤' },
+          { name: 'Jantar', calories: 600, icon: '🌙' }
+        ];
+
+  return {
+    totalCal,
+    proteinPct,
+    carbPct,
+    fatPct,
+    proteinG,
+    carbG,
+    fatG,
+    mealDist
+  };
+}
+
 function gerarSuplementos(p) {
   const s = [];
   if (p.restrictions && p.restrictions.includes('Sim') && p.restrictionDetail && (p.restrictionDetail.toLowerCase().includes('vegan') || p.restrictionDetail.toLowerCase().includes('vegetar'))) {
@@ -616,7 +687,7 @@ function gerarSuplementos(p) {
 }
 
 // ---- Constants ----
-const API_URL = 'http://localhost:3001/api';
+const API_URL = `${window.location.protocol}//${window.location.hostname}:3001/api`;
 
 // Mapa de transições de tela baseado em ações do usuário
 const ACTION_ROUTES = {
@@ -630,6 +701,7 @@ const ACTION_ROUTES = {
   'falar_contato': 'contato',
   'ver_plano': 'plano',
   'ver_estrategias': 'estrategias',
+  'ver_graficos': 'nutrition_charts',
   'ver_subs': 'substituicoes',
   'ver_lista': 'lista_compras',
   'ver_suplementacao': 'suplementacao',
@@ -756,6 +828,11 @@ function render(response) {
     case 'analise':
       container.innerHTML = renderAnalise(response);
       bindClicks(container);
+      return;
+    case 'nutrition_charts':
+      container.innerHTML = renderNutritionCharts(response);
+      bindClicks(container);
+      initCharts();
       return;
     default:
       container.innerHTML = renderChatScreen(response);
@@ -1103,6 +1180,224 @@ function renderAnalise(resp) {
       </div>
       ${resp.components.map(c => renderComponent(c, resp.screen)).join('')}
     </div>`;
+}
+
+function renderNutritionCharts(resp) {
+  const nd = resp.components.find(c => c.type === 'nutrition_charts')?.data;
+  if (!nd) return '<div class="screen" style="padding:24px;"><p>Erro ao carregar dados nutricionais.</p></div>';
+
+  return `
+    <div class="screen" id="screen-charts" style="padding:24px;overflow-y:auto;">
+      <div class="charts-header">
+        <div class="welcome-badge">Gráficos Nutricionais</div>
+        <h2 style="margin-top:8px;">Análise do seu plano</h2>
+        <p class="charts-subtitle">Baseado no seu perfil — ${nd.totalCal} kcal/dia</p>
+      </div>
+
+      <!-- Card Resumo -->
+      <div class="nutrition-summary">
+        <div class="summary-item">
+          <span class="summary-value">${nd.totalCal}</span>
+          <span class="summary-label">Calorias/dia</span>
+        </div>
+        <div class="summary-item">
+          <span class="summary-value">${nd.proteinG}g</span>
+          <span class="summary-label">Proteínas</span>
+        </div>
+        <div class="summary-item">
+          <span class="summary-value">${nd.carbG}g</span>
+          <span class="summary-label">Carboidratos</span>
+        </div>
+        <div class="summary-item">
+          <span class="summary-value">${nd.fatG}g</span>
+          <span class="summary-label">Gorduras</span>
+        </div>
+      </div>
+
+      <!-- Gráfico 1: Distribuição de Calorias por Refeição -->
+      <div class="chart-card">
+        <h3 class="chart-title">📊 Calorias por Refeição</h3>
+        <p class="chart-desc">Distribuição das ${nd.totalCal} kcal ao longo do dia</p>
+        <div class="chart-container">
+          <canvas id="chart-meals"></canvas>
+        </div>
+        <div class="chart-legend-meals">
+          ${nd.mealDist.map(m => `
+            <div class="legend-item">
+              <span class="legend-color" style="background:${getMealColor(nd.mealDist.indexOf(m))};"></span>
+              <span class="legend-label">${m.icon} ${m.name}</span>
+              <span class="legend-value">${m.calories} kcal</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+
+      <!-- Gráfico 2: Distribuição de Macronutrientes -->
+      <div class="chart-card">
+        <h3 class="chart-title">🥗 Distribuição de Macronutrientes</h3>
+        <p class="chart-desc">Proporção ideal para seu objetivo</p>
+        <div class="chart-container chart-container-doughnut">
+          <canvas id="chart-macros"></canvas>
+        </div>
+        <div class="macro-details">
+          <div class="macro-row macro-protein">
+            <span class="macro-dot"></span>
+            <span class="macro-name">Proteínas</span>
+            <span class="macro-bar"><span style="width:${nd.proteinPct}%;background:#22C55E;"></span></span>
+            <span class="macro-pct">${nd.proteinPct}%</span>
+            <span class="macro-grams">${nd.proteinG}g</span>
+          </div>
+          <div class="macro-row macro-carbs">
+            <span class="macro-dot"></span>
+            <span class="macro-name">Carboidratos</span>
+            <span class="macro-bar"><span style="width:${nd.carbPct}%;background:#F59E0B;"></span></span>
+            <span class="macro-pct">${nd.carbPct}%</span>
+            <span class="macro-grams">${nd.carbG}g</span>
+          </div>
+          <div class="macro-row macro-fat">
+            <span class="macro-dot"></span>
+            <span class="macro-name">Gorduras</span>
+            <span class="macro-bar"><span style="width:${nd.fatPct}%;background:#EF4444;"></span></span>
+            <span class="macro-pct">${nd.fatPct}%</span>
+            <span class="macro-grams">${nd.fatG}g</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Gráfico 3: Resumo do Dia -->
+      <div class="chart-card">
+        <h3 class="chart-title">⏰ Distribuição ao Longo do Dia</h3>
+        <p class="chart-desc">Como as calorias se distribuem nas refeições</p>
+        <div class="day-timeline">
+          ${nd.mealDist.map(m => {
+            const pct = Math.round((m.calories / nd.totalCal) * 100);
+            return `
+              <div class="timeline-item">
+                <div class="timeline-icon">${m.icon}</div>
+                <div class="timeline-content">
+                  <div class="timeline-name">${m.name}</div>
+                  <div class="timeline-track">
+                    <div class="timeline-fill" style="width:${pct}%;background:${getMealColor(nd.mealDist.indexOf(m))};"></div>
+                  </div>
+                  <div class="timeline-stats">
+                    <span>${m.calories} kcal</span>
+                    <span>${pct}% do dia</span>
+                  </div>
+                </div>
+              </div>`;
+          }).join('')}
+        </div>
+      </div>
+
+      ${resp.components.filter(c => c.type !== 'nutrition_charts').map(c => renderComponent(c, resp.screen)).join('')}
+    </div>`;
+}
+
+function getMealColor(index) {
+  const colors = ['#22C55E', '#F59E0B', '#3B82F6', '#A855F7', '#EF4444'];
+  return colors[index % colors.length];
+}
+
+function initCharts() {
+  const mealsCanvas = document.getElementById('chart-meals');
+  const macrosCanvas = document.getElementById('chart-macros');
+  if (!mealsCanvas || !macrosCanvas) return;
+
+  // Extrair dados do DOM
+  const legendItems = document.querySelectorAll('.legend-item');
+  const mealNames = [], mealCals = [], mealColors = [];
+  legendItems.forEach(item => {
+    const label = item.querySelector('.legend-label')?.textContent?.replace(/^[^\s]+\s/, '') || '';
+    const val = parseInt(item.querySelector('.legend-value')?.textContent) || 0;
+    const color = item.querySelector('.legend-color')?.style?.background || '#22C55E';
+    mealNames.push(label);
+    mealCals.push(val);
+    mealColors.push(color);
+  });
+
+  // Gráfico de Barras — Calorias por Refeição
+  if (window._chartMeals) window._chartMeals.destroy();
+  window._chartMeals = new Chart(mealsCanvas, {
+    type: 'bar',
+    data: {
+      labels: mealNames,
+      datasets: [{
+        label: 'Calorias',
+        data: mealCals,
+        backgroundColor: mealColors,
+        borderRadius: 6,
+        borderSkipped: false,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false }
+      },
+      scales: {
+        y: {
+          beginAtZero: true,
+          grid: { color: 'rgba(0,0,0,0.05)' },
+          ticks: { font: { size: 11 } }
+        },
+        x: {
+          grid: { display: false },
+          ticks: { font: { size: 10 } }
+        }
+      }
+    }
+  });
+
+  // Gráfico de Rosca — Macronutrientes
+  const macroPcts = [];
+  const macroLabels = [];
+  const macroColors = ['#22C55E', '#F59E0B', '#EF4444'];
+
+  document.querySelectorAll('.macro-row').forEach(row => {
+    const pctEl = row.querySelector('.macro-pct');
+    const nameEl = row.querySelector('.macro-name');
+    if (pctEl && nameEl) {
+      macroPcts.push(parseInt(pctEl.textContent));
+      macroLabels.push(nameEl.textContent);
+    }
+  });
+
+  if (window._chartMacros) window._chartMacros.destroy();
+  window._chartMacros = new Chart(macrosCanvas, {
+    type: 'doughnut',
+    data: {
+      labels: macroLabels,
+      datasets: [{
+        data: macroPcts,
+        backgroundColor: macroColors,
+        borderWidth: 0,
+        hoverOffset: 8
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '65%',
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: {
+            padding: 16,
+            usePointStyle: true,
+            font: { size: 12, weight: '600' }
+          }
+        },
+        tooltip: {
+          callbacks: {
+            label: function(ctx) {
+              return ctx.label + ': ' + ctx.parsed + '%';
+            }
+          }
+        }
+      }
+    }
+  });
 }
 
 // ---- Bind Clicks (replacement for bindActions) ----

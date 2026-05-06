@@ -247,12 +247,60 @@ function gerarInfoNutricional(p) {
   let calorias = 2000;
   let proteinas = 1.6;
   let observacao = '';
+  let macroSplit = { proteinasPct: 30, carboidratosPct: 40, gordurasPct: 30 };
+  let distribuicaoRefeicoes = [];
 
-  if (isLoss) { calorias = 1500; proteinas = 2.0; observacao = 'Déficit calórico moderado para perda de peso saudável (0.5-1kg/semana).'; }
-  else if (isGain) { calorias = 2800; proteinas = 2.2; observacao = 'Superávit calórico controlado para ganho de massa magra.'; }
-  else { observacao = 'Plano de manutenção com foco em qualidade nutricional e bem-estar.'; }
+  if (isLoss) {
+    calorias = 1500; proteinas = 2.0;
+    observacao = 'Déficit calórico moderado para perda de peso saudável (0.5-1kg/semana).';
+    macroSplit = { proteinasPct: 40, carboidratosPct: 30, gordurasPct: 30 };
+    distribuicaoRefeicoes = [
+      { refeicao: 'Café da Manhã', calorias: 300, icon: '🌅' },
+      { refeicao: 'Lanche da Manhã', calorias: 120, icon: '🍎' },
+      { refeicao: 'Almoço', calorias: 500, icon: '🍚' },
+      { refeicao: 'Lanche da Tarde', calorias: 130, icon: '🥤' },
+      { refeicao: 'Jantar', calorias: 450, icon: '🌙' },
+    ];
+  } else if (isGain) {
+    calorias = 2800; proteinas = 2.2;
+    observacao = 'Superávit calórico controlado para ganho de massa magra.';
+    macroSplit = { proteinasPct: 30, carboidratosPct: 45, gordurasPct: 25 };
+    distribuicaoRefeicoes = [
+      { refeicao: 'Café da Manhã', calorias: 550, icon: '🌅' },
+      { refeicao: 'Lanche da Manhã', calorias: 250, icon: '🍎' },
+      { refeicao: 'Almoço', calorias: 850, icon: '🍚' },
+      { refeicao: 'Lanche da Tarde', calorias: 300, icon: '🥤' },
+      { refeicao: 'Jantar', calorias: 850, icon: '🌙' },
+    ];
+  } else {
+    observacao = 'Plano de manutenção com foco em qualidade nutricional e bem-estar.';
+    distribuicaoRefeicoes = [
+      { refeicao: 'Café da Manhã', calorias: 400, icon: '🌅' },
+      { refeicao: 'Lanche da Manhã', calorias: 150, icon: '🍎' },
+      { refeicao: 'Almoço', calorias: 650, icon: '🍚' },
+      { refeicao: 'Lanche da Tarde', calorias: 200, icon: '🥤' },
+      { refeicao: 'Jantar', calorias: 600, icon: '🌙' },
+    ];
+  }
 
-  return { calorias_estimadas: calorias, proteinas_g_por_kg: proteinas, observacao };
+  const proteinasG = Math.round((calorias * macroSplit.proteinasPct / 100) / 4);
+  const carboidratosG = Math.round((calorias * macroSplit.carboidratosPct / 100) / 4);
+  const gordurasG = Math.round((calorias * macroSplit.gordurasPct / 100) / 9);
+
+  return {
+    calorias_estimadas: calorias,
+    proteinas_g_por_kg: proteinas,
+    observacao,
+    graficos: {
+      totalCalorias: calorias,
+      macronutrientes: {
+        proteinas: { gramas: proteinasG, percentual: macroSplit.proteinasPct },
+        carboidratos: { gramas: carboidratosG, percentual: macroSplit.carboidratosPct },
+        gorduras: { gramas: gordurasG, percentual: macroSplit.gordurasPct },
+      },
+      distribuicaoRefeicoes,
+    }
+  };
 }
 
 // ============================================================
