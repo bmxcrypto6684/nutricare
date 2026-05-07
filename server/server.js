@@ -4,14 +4,42 @@
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// ---- Security Headers (helmet) ----
+app.use(helmet({
+  contentSecurityPolicy: false, // CSP já definida no index.html
+  crossOriginEmbedderPolicy: false
+}));
+
+// ---- Rate Limiting ----
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minuto
+  max: 20, // máximo 20 requisições por minuto
+  message: { success: false, error: 'Muitas requisições. Tente novamente em 1 minuto.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+app.use('/api/', apiLimiter);
+
 // ---- Middleware ----
-app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '10mb' }));
+const CORS_ORIGINS = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',')
+  : ['http://localhost:3000', 'http://localhost:3001', 'https://johnnmacedo.github.io'];
+app.use(cors({ origin: CORS_ORIGINS, methods: ['GET', 'POST'] }));
+app.use(express.json({ limit: '500kb' })); // reduzido de 10mb para 500kb
 app.use(morgan('\x1b[36m:method\x1b[0m :url \x1b[33m:status\x1b[0m \x1b[90m:response-time ms\x1b[0m'));
+
+// ---- Static Files (apenas arquivos públicos) ----
+app.use(express.static(path.join(__dirname, '..'), {
+  dotfiles: 'ignore',
+  index: 'index.html'
+}));
 
 // ---- Request Log Helper ----
 function logRequest(title, data) {
@@ -20,6 +48,47 @@ function logRequest(title, data) {
   console.log(`║  ${timestamp} — ${title}`);
   console.log(`╚══════════════════════════════════════════╝`);
   if (data) console.log(JSON.stringify(data, null, 2));
+}
+
+// ---- Validação de entrada ----
+function validarProfile(p) {
+  const erros = [];
+
+  // peso: número positivo entre 20 e 500
+  const peso = parseFloat(p.weight);
+  if (p.weight !== undefined && p.weight !== '') {
+    if (isNaN(peso) || peso < 20 || peso > 500) {
+      erros.push('Peso deve ser um número entre 20 e 500 kg');
+    }
+  }
+
+  // altura: número positivo entre 50 e 250
+  const altura = parseFloat(p.height);
+  if (p.height !== undefined && p.height !== '') {
+    if (isNaN(altura) || altura < 50 || altura > 250) {
+      erros.push('Altura deve ser um número entre 50 e 250 cm');
+    }
+  }
+
+  // idade: número inteiro entre 10 e 120
+  const idade = parseInt(p.age, 10);
+  if (p.age !== undefined && p.age !== '') {
+    if (isNaN(idade) || idade < 10 || idade > 120) {
+      erros.push('Idade deve ser um número entre 10 e 120 anos');
+    }
+  }
+
+  // gênero
+  if (p.gender && !['Masculino', 'Feminino'].includes(p.gender)) {
+    erros.push('Gênero deve ser Masculino ou Feminino');
+  }
+
+  // objetivo
+  if (p.goal && !p.goal.includes('Emagrecimento') && !p.goal.includes('massa muscular') && !p.goal.includes('Saúde') && !p.goal.includes('Bem-estar')) {
+    erros.push('Objetivo inválido');
+  }
+
+  return erros;
 }
 
 // ============================================================
@@ -50,8 +119,17 @@ app.post('/api/consulta', (req, res) => {
     });
   }
 
+  // Validação de campos
+  const erros = validarProfile(profile);
+  if (erros.length > 0) {
+    return res.status(400).json({
+      success: false,
+      error: 'Dados inválidos',
+      detalhes: erros
+    });
+  }
+
   try {
-    // Simula processamento de IA (estrutura preparada para OpenAI/Claude)
     const plano = gerarPlanoCompleto(profile);
 
     console.log(`\n✅ Plano gerado para: ${profile.goal || 'perfil genérico'}`);
@@ -89,7 +167,62 @@ function gerarPlanoCompleto(p) {
     lista_compras: gerarListaCompras(),
     estrategias: gerarEstrategias(p),
     suplementos: gerarSuplementos(p),
-    info_nutricional: gerarInfoNutricional(p)
+    info_nutricional: gerarInfoNutricional(p),
+    antropometrico: gerarDadosAntropometricos(p)
+  };
+}
+
+// ============================================================
+// Cálculos Antropométricos (TMB, IMC)
+// ============================================================
+function calcularTMB(p) {
+  const peso = parseFloat(p.weight);
+  const altura = parseFloat(p.height);
+  const idade = parseInt(p.age, 10);
+  if (!peso || !altura || !idade || isNaN(peso) || isNaN(altura) || isNaN(idade) || !p.gender) return null;
+  if (p.gender === 'Masculino') {
+    return Math.round(10 * peso + 6.25 * altura - 5 * idade + 5);
+  } else {
+    return Math.round(10 * peso + 6.25 * altura - 5 * idade - 161);
+  }
+}
+
+function calcularGET(p) {
+  const tmb = calcularTMB(p);
+  if (!tmb) return null;
+  const isLoss = p.goal && p.goal.includes('Emagrecimento');
+  const isGain = p.goal && p.goal.includes('massa muscular');
+  let fator = isLoss ? 1.2 : isGain ? 1.6 : 1.4;
+  if (p.activity === 'Sedentário') fator = Math.max(fator - 0.05, 1.1);
+  else if (p.activity === 'Moderado') fator += 0.1;
+  else if (p.activity === 'Intenso') fator += 0.2;
+  return Math.round(tmb * fator);
+}
+
+function calcularIMC(p) {
+  const peso = parseFloat(p.weight);
+  const altura = parseFloat(p.height);
+  if (!peso || !altura || isNaN(peso) || isNaN(altura)) return null;
+  const imc = peso / Math.pow(altura / 100, 2);
+  let categoria = '';
+  if (imc < 18.5) categoria = 'Abaixo do peso';
+  else if (imc < 25) categoria = 'Peso adequado';
+  else if (imc < 30) categoria = 'Sobrepeso';
+  else if (imc < 35) categoria = 'Obesidade grau I';
+  else if (imc < 40) categoria = 'Obesidade grau II';
+  else categoria = 'Obesidade grau III';
+  return { valor: Math.round(imc * 10) / 10, categoria };
+}
+
+function gerarDadosAntropometricos(p) {
+  return {
+    peso: p.weight || null,
+    altura: p.height || null,
+    idade: p.age || null,
+    sexo: p.gender || null,
+    imc: calcularIMC(p),
+    tmb: calcularTMB(p),
+    get: calcularGET(p)
   };
 }
 
@@ -104,6 +237,13 @@ function gerarDiagnostico(p) {
   if (p.restrictions && p.restrictions.length > 0 && p.restrictionDetail) {
     resumo.push(`Restrições: ${p.restrictionDetail}`);
   }
+
+  const imcData = calcularIMC(p);
+  const tmb = calcularTMB(p);
+  const get = calcularGET(p);
+  if (imcData) resumo.push(`IMC: ${imcData.valor} — ${imcData.categoria}`);
+  if (tmb) resumo.push(`TMB: ${tmb} kcal/dia`);
+  if (get) resumo.push(`GET: ${get} kcal/dia`);
 
   if (p.diet) {
     const d = p.diet.toLowerCase();
@@ -243,49 +383,75 @@ function gerarSuplementos(p) {
 function gerarInfoNutricional(p) {
   const isLoss = p.goal && p.goal.includes('Emagrecimento');
   const isGain = p.goal && p.goal.includes('massa muscular');
+  const peso = parseFloat(p.weight) || 70;
 
-  let calorias = 2000;
-  let proteinas = 1.6;
+  const tmb = calcularTMB(p);
+  const get = calcularGET(p);
+
+  let calorias = get || (isLoss ? 1500 : isGain ? 2800 : 2000);
+  let proteinas = isLoss ? 2.0 : isGain ? 2.2 : 1.6;
   let observacao = '';
   let macroSplit = { proteinasPct: 30, carboidratosPct: 40, gordurasPct: 30 };
   let distribuicaoRefeicoes = [];
 
   if (isLoss) {
-    calorias = 1500; proteinas = 2.0;
-    observacao = 'Déficit calórico moderado para perda de peso saudável (0.5-1kg/semana).';
+    if (get) {
+      observacao = `Déficit calórico de ${Math.round(calorias * 0.17)} kcal para perda de peso saudável (0.5-1kg/semana). TMB calculada: ${tmb} kcal/dia.`;
+    } else {
+      observacao = 'Déficit calórico moderado para perda de peso saudável (0.5-1kg/semana).';
+    }
     macroSplit = { proteinasPct: 40, carboidratosPct: 30, gordurasPct: 30 };
     distribuicaoRefeicoes = [
-      { refeicao: 'Café da Manhã', calorias: 300, icon: '🌅' },
-      { refeicao: 'Lanche da Manhã', calorias: 120, icon: '🍎' },
-      { refeicao: 'Almoço', calorias: 500, icon: '🍚' },
-      { refeicao: 'Lanche da Tarde', calorias: 130, icon: '🥤' },
-      { refeicao: 'Jantar', calorias: 450, icon: '🌙' },
+      { refeicao: 'Café da Manhã', calorias: Math.round(calorias * 0.22), icon: '🌅' },
+      { refeicao: 'Lanche da Manhã', calorias: Math.round(calorias * 0.08), icon: '🍎' },
+      { refeicao: 'Almoço', calorias: Math.round(calorias * 0.33), icon: '🍚' },
+      { refeicao: 'Lanche da Tarde', calorias: Math.round(calorias * 0.09), icon: '🥤' },
+      { refeicao: 'Jantar', calorias: Math.round(calorias * 0.28), icon: '🌙' },
     ];
   } else if (isGain) {
-    calorias = 2800; proteinas = 2.2;
-    observacao = 'Superávit calórico controlado para ganho de massa magra.';
+    if (get) {
+      observacao = `Superávit calórico de ${Math.round(calorias * 0.17)} kcal para ganho de massa magra. TMB calculada: ${tmb} kcal/dia.`;
+    } else {
+      observacao = 'Superávit calórico controlado para ganho de massa magra.';
+    }
     macroSplit = { proteinasPct: 30, carboidratosPct: 45, gordurasPct: 25 };
     distribuicaoRefeicoes = [
-      { refeicao: 'Café da Manhã', calorias: 550, icon: '🌅' },
-      { refeicao: 'Lanche da Manhã', calorias: 250, icon: '🍎' },
-      { refeicao: 'Almoço', calorias: 850, icon: '🍚' },
-      { refeicao: 'Lanche da Tarde', calorias: 300, icon: '🥤' },
-      { refeicao: 'Jantar', calorias: 850, icon: '🌙' },
+      { refeicao: 'Café da Manhã', calorias: Math.round(calorias * 0.20), icon: '🌅' },
+      { refeicao: 'Lanche da Manhã', calorias: Math.round(calorias * 0.09), icon: '🍎' },
+      { refeicao: 'Almoço', calorias: Math.round(calorias * 0.30), icon: '🍚' },
+      { refeicao: 'Lanche da Tarde', calorias: Math.round(calorias * 0.11), icon: '🥤' },
+      { refeicao: 'Jantar', calorias: Math.round(calorias * 0.30), icon: '🌙' },
     ];
   } else {
-    observacao = 'Plano de manutenção com foco em qualidade nutricional e bem-estar.';
+    if (get) {
+      observacao = `Plano de manutenção baseado no seu gasto energético total de ${get} kcal/dia.`;
+    } else {
+      observacao = 'Plano de manutenção com foco em qualidade nutricional e bem-estar.';
+    }
     distribuicaoRefeicoes = [
-      { refeicao: 'Café da Manhã', calorias: 400, icon: '🌅' },
-      { refeicao: 'Lanche da Manhã', calorias: 150, icon: '🍎' },
-      { refeicao: 'Almoço', calorias: 650, icon: '🍚' },
-      { refeicao: 'Lanche da Tarde', calorias: 200, icon: '🥤' },
-      { refeicao: 'Jantar', calorias: 600, icon: '🌙' },
+      { refeicao: 'Café da Manhã', calorias: Math.round(calorias * 0.22), icon: '🌅' },
+      { refeicao: 'Lanche da Manhã', calorias: Math.round(calorias * 0.08), icon: '🍎' },
+      { refeicao: 'Almoço', calorias: Math.round(calorias * 0.32), icon: '🍚' },
+      { refeicao: 'Lanche da Tarde', calorias: Math.round(calorias * 0.10), icon: '🥤' },
+      { refeicao: 'Jantar', calorias: Math.round(calorias * 0.28), icon: '🌙' },
     ];
   }
 
-  const proteinasG = Math.round((calorias * macroSplit.proteinasPct / 100) / 4);
-  const carboidratosG = Math.round((calorias * macroSplit.carboidratosPct / 100) / 4);
-  const gordurasG = Math.round((calorias * macroSplit.gordurasPct / 100) / 9);
+  const proteinasG = Math.round(peso * proteinas);
+  const proteinCal = proteinasG * 4;
+
+  const remainingCal = Math.max(0, calorias - proteinCal);
+  const carbRatio = macroSplit.carboidratosPct / (macroSplit.carboidratosPct + macroSplit.gordurasPct);
+  const fatRatio = macroSplit.gordurasPct / (macroSplit.carboidratosPct + macroSplit.gordurasPct);
+  const carboidratosG = Math.round((remainingCal * carbRatio) / 4);
+  const gordurasG = Math.round((remainingCal * fatRatio) / 9);
+
+  const realCarbCal = carboidratosG * 4;
+  const realFatCal = gordurasG * 9;
+  const realTotal = proteinCal + realCarbCal + realFatCal;
+  const realProtPct = Math.round((proteinCal / realTotal) * 100);
+  const realCarbPct = Math.round((realCarbCal / realTotal) * 100);
+  const realFatPct = Math.round((realFatCal / realTotal) * 100);
 
   return {
     calorias_estimadas: calorias,
@@ -294,9 +460,9 @@ function gerarInfoNutricional(p) {
     graficos: {
       totalCalorias: calorias,
       macronutrientes: {
-        proteinas: { gramas: proteinasG, percentual: macroSplit.proteinasPct },
-        carboidratos: { gramas: carboidratosG, percentual: macroSplit.carboidratosPct },
-        gorduras: { gramas: gordurasG, percentual: macroSplit.gordurasPct },
+        proteinas: { gramas: proteinasG, percentual: realProtPct },
+        carboidratos: { gramas: carboidratosG, percentual: realCarbPct },
+        gorduras: { gramas: gordurasG, percentual: realFatPct },
       },
       distribuicaoRefeicoes,
     }
@@ -313,5 +479,6 @@ app.listen(PORT, () => {
   console.log(`  URL:    http://localhost:${PORT}`);
   console.log(`  Health: http://localhost:${PORT}/api/health`);
   console.log(`  API:    POST http://localhost:${PORT}/api/consulta`);
+  console.log(`  Rate limit: 20 req/min por IP`);
   console.log('='.repeat(48) + '\n');
 });

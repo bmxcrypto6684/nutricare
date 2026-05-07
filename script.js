@@ -34,6 +34,8 @@ function engine(action, payload) {
           { type: 'hero', title: 'Olá! Vou montar seu plano alimentar personalizado 🥗', subtitle: 'Atendimento humanizado com plano feito sob medida para você.' },
           { type: 'buttons', items: [
             { text: '▶️ Iniciar consulta', action: 'iniciar_consulta', variant: 'primary' },
+            { text: '🗂️ Histórico', action: 'ver_historico', variant: 'outline' },
+            { text: '📈 Meu Progresso', action: 'ver_progresso', variant: 'outline' },
             { text: 'ℹ️ Como funciona', action: 'como_funciona', variant: 'outline' },
             { text: '💰 Ver planos', action: 'ver_planos', variant: 'outline' }
           ]}
@@ -151,7 +153,7 @@ function engine(action, payload) {
         if (action === 'ans_restr_detail') {
           STATE.profile.restrictionDetail = payload || '';
           STATE.anamneseStep++;
-          if (STATE.anamneseStep >= 7) { return transitionToAnalise(); }
+          if (STATE.anamneseStep >= ANAMNESE_TOTAL_STEPS) { return transitionToAnalise(); }
           return showAnamneseQuestion(STATE.anamneseStep);
         }
 
@@ -172,13 +174,13 @@ function engine(action, payload) {
         // Exams skip/done
         if (action === 'ans_exams_skip' || action === 'ans_exams_done') {
           STATE.anamneseStep++;
-          if (STATE.anamneseStep >= 7) { return transitionToAnalise(); }
+          if (STATE.anamneseStep >= ANAMNESE_TOTAL_STEPS) { return transitionToAnalise(); }
           return showAnamneseQuestion(STATE.anamneseStep);
         }
 
         // Normal answer — advance step
         STATE.anamneseStep++;
-        if (STATE.anamneseStep >= 7) { return transitionToAnalise(); }
+        if (STATE.anamneseStep >= ANAMNESE_TOTAL_STEPS) { return transitionToAnalise(); }
         return showAnamneseQuestion(STATE.anamneseStep);
       }
 
@@ -193,6 +195,9 @@ function engine(action, payload) {
         ? STATE.plano.diagnostico
         : gerarDiagnostico(STATE.profile);
       STATE.plano = diag;
+      STATE.lastDiagnostico = diag.resumo && diag.resumo.length > 0
+        ? diag.resumo.join(' · ') : STATE.profile.goal || '';
+      STATE.lastPlano = true;
       return {
         screen: 'analise',
         message: 'Analisei seus dados e identifiquei pontos importantes...',
@@ -231,8 +236,7 @@ function engine(action, payload) {
           { id: 'ver_lista', next: 'lista_compras' },
           { id: 'ver_graficos', next: 'nutrition_charts' },
           { id: 'ver_estrategias', next: 'estrategias' },
-          { id: 'ver_suplementacao', next: 'suplementacao' },
-          { id: 'voltar_analise', next: 'analise' }
+          { id: 'ver_suplementacao', next: 'suplementacao' }
         ]
       };
     }
@@ -384,6 +388,32 @@ function engine(action, payload) {
         actions: [{ id: 'voltar_acomp', next: 'acompanhamento' }]
       };
 
+    // ============================
+    case 'historico':
+      return { screen: 'historico', message: '', components: [], actions: [
+        { id: 'voltar_menu', next: 'onboarding' }
+      ]};
+
+    case 'progresso':
+      return { screen: 'progresso', message: '', components: [], actions: [
+        { id: 'voltar_menu', next: 'onboarding' }
+      ]};
+
+    case 'detalhe_consulta': {
+      const historico = carregarHistorico();
+      const consulta = payload ? historico.find(h => String(h.id) === String(payload)) : null;
+      return {
+        screen: 'detalhe_consulta',
+        message: '',
+        consulta: consulta,
+        components: [],
+        actions: [
+          { id: 'voltar_menu', next: 'onboarding' },
+          { id: 'ver_historico', next: 'historico' }
+        ]
+      };
+    }
+
     default:
       return engine(null, null);
   }
@@ -422,7 +452,14 @@ function showAnamneseQuestion(step) {
     { msg: `Possui <strong>exames recentes</strong>?`, type: 'options', key: 'exams', items: [
         { text: 'Sim, tenho exames', action: 'ans_exams_yes' },
         { text: 'Não, não tenho', action: 'ans_exams_no' }
-    ]}
+    ]},
+    { msg: `Qual seu <strong>sexo</strong>?`, type: 'options', key: 'gender', items: [
+        { text: 'Masculino', action: 'ans_gender_m' },
+        { text: 'Feminino', action: 'ans_gender_f' }
+    ]},
+    { msg: `Qual sua <strong>idade</strong>?`, type: 'text', key: 'age', placeholder: 'Ex: 30' },
+    { msg: `Qual seu <strong>peso</strong>? (kg)`, type: 'text', key: 'weight', placeholder: 'Ex: 70' },
+    { msg: `Qual sua <strong>altura</strong>? (cm)`, type: 'text', key: 'height', placeholder: 'Ex: 170' }
   ];
 
   if (step >= questions.length) {
@@ -458,7 +495,9 @@ function handleAnamneseAnswer(action, payload) {
     'ans_exams_no': ['hasExams', false],
     'ans_exams_yes': ['hasExams', true],
     'ans_exams_done': ['hasExams', true],
-    'ans_exams_skip': ['hasExams', false]
+    'ans_exams_skip': ['hasExams', false],
+    'ans_gender_m': ['gender', 'Masculino'],
+    'ans_gender_f': ['gender', 'Feminino']
   };
 
   if (map[action]) {
@@ -482,6 +521,36 @@ function gerarDiagnostico(p) {
   if (p.sleep) resumo.push(`😴 Sono: <strong>${p.sleep}</strong>`);
   if (p.activity) resumo.push(`🏃 Atividade: <strong>${p.activity}</strong>`);
 
+  // Dados antropométricos
+  const peso = parseFloat(p.weight);
+  const altura = parseFloat(p.height);
+  const idade = parseInt(p.age, 10);
+  if (peso && altura) {
+    const imc = peso / Math.pow(altura / 100, 2);
+    const imcStr = imc.toFixed(1);
+    let categoria = '';
+    if (imc < 18.5) categoria = 'Abaixo do peso';
+    else if (imc < 25) categoria = 'Peso adequado';
+    else if (imc < 30) categoria = 'Sobrepeso';
+    else if (imc < 35) categoria = 'Obesidade grau I';
+    else if (imc < 40) categoria = 'Obesidade grau II';
+    else categoria = 'Obesidade grau III';
+    resumo.push(`📊 IMC: <strong>${imcStr}</strong> — ${categoria}`);
+    if (idade) resumo.push(`🎂 Idade: <strong>${idade} anos</strong>`);
+    if (p.gender) resumo.push(`⚧️ Sexo: <strong>${p.gender}</strong>`);
+
+    if (imc >= 30) atencao.push('IMC elevado — acompanhamento profissional é recomendado para saúde metabólica');
+    else if (imc < 18.5) atencao.push('IMC abaixo do ideal — importante focar em ganho de massa magra com acompanhamento');
+
+    // TMB
+    const tmb = calcularTMB(p);
+    if (tmb) {
+      resumo.push(`🔥 TMB: <strong>${tmb} kcal/dia</strong> (metabolismo basal)`);
+      const get = calcularGET(p);
+      if (get) resumo.push(`⚡ GET: <strong>${get} kcal/dia</strong> (gasto energético total)`);
+    }
+  }
+
   if (p.diet) {
     const d = p.diet.toLowerCase();
     if (d.includes('refri') || d.includes('fritura') || d.includes('ultraprocessado')) {
@@ -501,7 +570,7 @@ function gerarDiagnostico(p) {
   }
 
   if (p.restrictions && p.restrictions.includes('Sim') && p.restrictionDetail) {
-    resumo.push(`🚫 Restrições: <strong>${p.restrictionDetail}</strong>`);
+    resumo.push(`🚫 Restrições: <strong>${escapeHtml(p.restrictionDetail)}</strong>`);
   }
 
   oportunidades.push('Aumentar consumo de água — 35ml por kg de peso');
@@ -513,6 +582,163 @@ function gerarDiagnostico(p) {
   if (atencao.length === 0) atencao.push('Perfil equilibrado — vamos potencializar ainda mais!');
 
   return { resumo, atencao, oportunidades };
+}
+
+// ---- Receitas Detalhadas ----
+const RECEITAS = {
+  cafe: [
+    {
+      nome: 'Ovos Mexidos com Pão Integral',
+      ingredientes: ['2 ovos', '1 fatia de pão integral', '1 colher (chá) de azeite', 'Sal e pimenta a gosto', 'Salsinha picada'],
+      preparo: ['Aqueça o azeite em uma frigideira antiaderente', 'Bata os ovos com sal e pimenta', 'Despeje na frigideira e mexa até cozinhar', 'Torre o pão integral e sirva com os ovos'],
+      tempo: '10 min',
+      dicas: 'Adicione cottage ou requeijão light para mais proteína',
+      objetivos: ['Emagrecimento', 'Manutenção']
+    },
+    {
+      nome: 'Panqueca de Banana e Aveia',
+      ingredientes: ['1 banana madura', '2 colheres (sopa) de aveia', '1 ovo', 'Canela em pó a gosto', 'Mel a gosto'],
+      preparo: ['Amasse a banana com um garfo', 'Misture o ovo, aveia e canela até formar uma massa', 'Aqueça uma frigideira untada', 'Despeje a massa e doure dos dois lados'],
+      tempo: '12 min',
+      dicas: 'Sirva com pasta de amendoim ou iogurte grego',
+      objetivos: ['Ganho de massa muscular', 'Manutenção']
+    },
+    {
+      nome: 'Tapioca Recheada com Queijo',
+      ingredientes: ['3 colheres (sopa) de goma de tapioca', '2 fatias de queijo branco', '1 colher (chá) de manteiga', 'Orégano a gosto'],
+      preparo: ['Umedeça a goma e peneire em uma frigideira quente', 'Espalhe bem e deixe dourar de um lado', 'Vire a tapioca e adicione o queijo', 'Dobre ao meio e sirva'],
+      tempo: '8 min',
+      dicas: 'Adicione frango desfiado para uma versão mais proteica',
+      objetivos: ['Emagrecimento', 'Ganho de massa muscular']
+    }
+  ],
+  lanche_manha: [
+    {
+      nome: 'Iogurte com Frutas e Granola',
+      ingredientes: ['1 pote de iogurte natural', '1/2 xícara de frutas vermelhas', '2 colheres (sopa) de granola', '1 colher (chá) de mel'],
+      preparo: ['Coloque o iogurte em uma tigela', 'Lave as frutas e adicione por cima', 'Finalize com granola e mel'],
+      tempo: '5 min',
+      dicas: 'Use frutas da estação para mais sabor e economia',
+      objetivos: ['Emagrecimento', 'Manutenção', 'Ganho de massa muscular']
+    },
+    {
+      nome: 'Banana com Pasta de Amendoim',
+      ingredientes: ['1 banana', '1 colher (sopa) de pasta de amendoim', '1 colher (sopa) de aveia', 'Canela a gosto'],
+      preparo: ['Corte a banana em rodelas', 'Espalhe a pasta de amendoim', 'Polvilhe aveia e canela por cima'],
+      tempo: '3 min',
+      dicas: 'Excelente pré-treino por carboidrato + proteína',
+      objetivos: ['Ganho de massa muscular', 'Manutenção']
+    }
+  ],
+  almoco: [
+    {
+      nome: 'Frango Grelhado com Arroz Integral e Legumes',
+      ingredientes: ['150g de peito de frango', '4 colheres (sopa) de arroz integral cozido', '1 xícara de brócolis', '1 cenoura em cubos', '2 dentes de alho', 'Azeite, sal e temperos'],
+      preparo: ['Tempere o frango com alho, sal e ervas', 'Grelhe o frango em frigideira com azeite até dourar', 'Cozinhe o arroz integral conforme instrução', 'Refogue os legumes no alho e azeite', 'Sirva tudo em um prato'],
+      tempo: '30 min',
+      dicas: 'Faça em quantidade maior e congele porções',
+      objetivos: ['Emagrecimento', 'Manutenção', 'Ganho de massa muscular']
+    },
+    {
+      nome: 'Salmão ao Forno com Batata Doce',
+      ingredientes: ['1 filé de salmão (150g)', '1 batata doce média', 'Aspargos ou vagem', 'Azeite, limão, alecrim', 'Sal e pimenta'],
+      preparo: ['Tempere o salmão com limão, alecrim, sal e azeite', 'Corte a batata doce em rodelas e tempere', 'Disponha salmão e batata em uma assadeira', 'Asse a 200°C por 20-25 min', 'Adicione os aspargos nos últimos 10 min'],
+      tempo: '35 min',
+      dicas: 'Salmão é rico em ômega-3, ótimo para saúde cardiovascular',
+      objetivos: ['Emagrecimento', 'Manutenção']
+    },
+    {
+      nome: 'Carne Moída com Quinoa e Salada',
+      ingredientes: ['150g de patinho moído', '1/2 xícara de quinoa', 'Alface, tomate, pepino', 'Cebola roxa', 'Azeite, sal, limão'],
+      preparo: ['Cozinhe a quinoa em água fervente por 15 min', 'Refogue a carne com cebola e temperos', 'Lave e corte os vegetais para a salada', 'Monte o prato com quinoa, carne e salada'],
+      tempo: '25 min',
+      dicas: 'Quinoa tem todos os aminoácidos essenciais',
+      objetivos: ['Ganho de massa muscular', 'Manutenção']
+    }
+  ],
+  lanche_tarde: [
+    {
+      nome: 'Smoothie Proteico',
+      ingredientes: ['1 banana', '1 scoop de whey protein (ou proteína vegetal)', '200ml de leite ou bebida vegetal', '1 colher (sopa) de pasta de amendoim', 'Gelo a gosto'],
+      preparo: ['Coloque todos os ingredientes no liquidificador', 'Bata até ficar homogêneo', 'Sirva em seguida'],
+      tempo: '5 min',
+      dicas: 'Ótimo pós-treino para recuperação muscular',
+      objetivos: ['Ganho de massa muscular']
+    },
+    {
+      nome: 'Frutas com Cottage',
+      ingredientes: ['1/2 xícara de queijo cottage', '1 maçã ou pera picada', '1 colher (sopa) de castanhas picadas', 'Mel a gosto'],
+      preparo: ['Coloque o cottage em uma tigela', 'Adicione a fruta picada por cima', 'Finalize com castanhas e mel'],
+      tempo: '4 min',
+      dicas: 'Cottage é rico em caseína, proteína de absorção lenta',
+      objetivos: ['Emagrecimento', 'Manutenção']
+    }
+  ],
+  jantar: [
+    {
+      nome: 'Omelete Recheado com Salada',
+      ingredientes: ['3 ovos', '1/2 tomate picado', '1/4 de cebola picada', 'Folhas de espinafre', 'Queijo ralado a gosto', 'Sal, pimenta e orégano'],
+      preparo: ['Bata os ovos com sal, pimenta e orégano', 'Despeje em frigideira antiaderente aquecida', 'Adicione tomate, cebola, espinafre e queijo', 'Dobre a omelete ao meio e sirva', 'Acompanhe com salada verde'],
+      tempo: '15 min',
+      dicas: 'Adicione frango desfiado para mais proteína',
+      objetivos: ['Emagrecimento', 'Manutenção', 'Ganho de massa muscular']
+    },
+    {
+      nome: 'Wrap Integral de Frango',
+      ingredientes: ['1 wrap integral', '100g de frango desfiado', 'Alface e rúcula', 'Tomate em cubos', '1 colher (sopa) de ricota ou cream cheese light'],
+      preparo: ['Aqueça o wrap em uma frigideira', 'Espalhe a ricota sobre o wrap', 'Adicione o frango desfiado', 'Coloque alface, rúcula e tomate', 'Enrole e sirva'],
+      tempo: '15 min',
+      dicas: 'Pode substituir o frango por atum ou carne desfiada',
+      objetivos: ['Emagrecimento', 'Manutenção']
+    }
+  ]
+};
+
+function selecionarReceitas(mealType, goal) {
+  const lista = RECEITAS[mealType] || [];
+  // Filtrar por objetivo, ou retornar todas se nenhum match
+  const match = lista.filter(r => !r.objetivos || r.objetivos.some(o => goal && goal.includes(o)));
+  return match.length > 0 ? match : lista.slice(0, 1);
+}
+
+function gerarReceitaHtml(receita) {
+  if (!receita) return '';
+  return `
+    <div class="receita-card">
+      <div class="receita-header" onclick="toggleReceita(this)">
+        <span class="receita-nome">${receita.nome}</span>
+        <span class="receita-tempo">${receita.tempo}</span>
+        <svg class="receita-toggle" width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 5L7 9L11 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </div>
+      <div class="receita-body" style="max-height:0;overflow:hidden;transition:max-height 0.4s;">
+        <div class="receita-section">
+          <strong>Ingredientes:</strong>
+          <ul class="receita-ingredientes">
+            ${receita.ingredientes.map(i => `<li>${i}</li>`).join('')}
+          </ul>
+        </div>
+        <div class="receita-section">
+          <strong>Modo de Preparo:</strong>
+          <ol class="receita-preparo">
+            ${receita.preparo.map((p, idx) => `<li><span class="receita-passo-num">${idx + 1}</span><span>${p}</span></li>`).join('')}
+          </ol>
+        </div>
+        ${receita.dicas ? `<div class="receita-dicas">💡 ${receita.dicas}</div>` : ''}
+      </div>
+    </div>`;
+}
+
+function gerarReceitasParaRefeicao(mealName, goal) {
+  const map = {
+    'Café da Manhã': 'cafe',
+    'Lanche da Manhã': 'lanche_manha',
+    'Almoço': 'almoco',
+    'Lanche da Tarde': 'lanche_tarde',
+    'Jantar': 'jantar'
+  };
+  const key = map[mealName];
+  if (!key) return '';
+  return selecionarReceitas(key, goal).map(r => gerarReceitaHtml(r)).join('');
 }
 
 // ---- Refeições ----
@@ -611,29 +837,78 @@ function gerarDicas(p) {
   return tips;
 }
 
+// ---- TMB Calculator (Mifflin-St Jeor) ----
+function calcularTMB(p) {
+  const peso = parseFloat(p.weight);
+  const altura = parseFloat(p.height);
+  const idade = parseInt(p.age, 10);
+  if (!peso || !altura || !idade || !p.gender || isNaN(peso) || isNaN(altura) || isNaN(idade)) return null;
+  if (p.gender === 'Masculino') {
+    return Math.round(10 * peso + 6.25 * altura - 5 * idade + 5);
+  } else {
+    return Math.round(10 * peso + 6.25 * altura - 5 * idade - 161);
+  }
+}
+
+function calcularGET(p) {
+  const tmb = calcularTMB(p);
+  if (!tmb) return null;
+
+  const isLoss = p.goal && p.goal.includes('Emagrecimento');
+  const isGain = p.goal && p.goal.includes('massa muscular');
+
+  let fator;
+  if (isLoss) fator = 1.2;
+  else if (isGain) fator = 1.6;
+  else fator = 1.4;
+
+  // Ajuste por atividade física
+  if (p.activity === 'Sedentário') fator = Math.max(fator - 0.05, 1.1);
+  else if (p.activity === 'Moderado') fator += 0.1;
+  else if (p.activity === 'Intenso') fator += 0.2;
+
+  return Math.round(tmb * fator);
+}
+
 // ---- Dados Nutricionais para Gráficos ----
 function gerarDadosNutricionais(p) {
   const isLoss = p.goal && p.goal.includes('Emagrecimento');
   const isGain = p.goal && p.goal.includes('massa muscular');
+  const peso = parseFloat(p.weight) || 70;
 
-  let totalCal, proteinPct, carbPct, fatPct;
-  if (isLoss) {
-    totalCal = 1500; proteinPct = 40; carbPct = 30; fatPct = 30;
-  } else if (isGain) {
-    totalCal = 2800; proteinPct = 30; carbPct = 45; fatPct = 25;
-  } else {
-    totalCal = 2000; proteinPct = 30; carbPct = 40; fatPct = 30;
-  }
+  const totalCal = calcularGET(p) || (isLoss ? 1500 : isGain ? 2800 : 2000);
+  let proteinPct, carbPct, fatPct;
+  if (isLoss) { proteinPct = 40; carbPct = 30; fatPct = 30; }
+  else if (isGain) { proteinPct = 30; carbPct = 45; fatPct = 25; }
+  else { proteinPct = 30; carbPct = 40; fatPct = 30; }
 
-  const proteinG = Math.round((totalCal * proteinPct / 100) / 4);
-  const carbG = Math.round((totalCal * carbPct / 100) / 4);
-  const fatG = Math.round((totalCal * fatPct / 100) / 9);
+  // Proteína baseada no peso corporal (g/kg) — fonte primária
+  const protPorKg = isLoss ? 2.0 : isGain ? 2.2 : 1.6;
+  const proteinG = Math.round(peso * protPorKg);
+  const proteinCal = proteinG * 4;
+
+  // Carboidratos e gorduras dividem o restante das calorias na proporção %
+  const remainingCal = Math.max(0, totalCal - proteinCal);
+  const carbRatio = carbPct / (carbPct + fatPct);
+  const fatRatio = fatPct / (carbPct + fatPct);
+  const carbG = Math.round((remainingCal * carbRatio) / 4);
+  const fatG = Math.round((remainingCal * fatRatio) / 9);
+
+  // Recalcular % real baseado nos gramas
+  const realCarbCal = carbG * 4;
+  const realFatCal = fatG * 9;
+  const realTotalCal = proteinCal + realCarbCal + realFatCal;
+  const realProteinPct = Math.round((proteinCal / realTotalCal) * 100);
+  const realCarbPct = Math.round((realCarbCal / realTotalCal) * 100);
+  const realFatPct = Math.round((realFatCal / realTotalCal) * 100);
+  // Ajustar carb se necessário para fechar 100% (último dígito)
+  const adjustedCarbPct = Math.max(0, 100 - realProteinPct - realFatPct);
 
   // Distribuição de calorias por refeição
   const mealDist = isLoss
     ? [
         { name: 'Café da Manhã', calories: 300, icon: '🌅' },
-        { name: 'Lanche Manhã', calories: 120, icon: '🍎' },
+        { name: 'Lanche da Manhã', calories: 120, icon: '🍎' },
         { name: 'Almoço', calories: 500, icon: '🍚' },
         { name: 'Lanche Tarde', calories: 130, icon: '🥤' },
         { name: 'Jantar', calories: 450, icon: '🌙' }
@@ -656,12 +931,15 @@ function gerarDadosNutricionais(p) {
 
   return {
     totalCal,
-    proteinPct,
-    carbPct,
-    fatPct,
+    tmb: calcularTMB(p),
+    get: totalCal,
+    proteinPct: realProteinPct,
+    carbPct: adjustedCarbPct,
+    fatPct: realFatPct,
     proteinG,
     carbG,
     fatG,
+    protPorKg,
     mealDist
   };
 }
@@ -687,12 +965,235 @@ function gerarSuplementos(p) {
 }
 
 // ---- Constants ----
-const API_URL = `${window.location.protocol}//${window.location.hostname}:3001/api`;
+const API_URL = window.location.protocol === 'file:'
+  ? 'http://localhost:3001/api'
+  : `${window.location.protocol}//${window.location.hostname}:3001/api`;
+
+const ANAMNESE_TOTAL_STEPS = 11; // Total de perguntas da anamnese
+
+// ---- Sanitização HTML ----
+function escapeHtml(str) {
+  if (!str) return '';
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+// ---- Histórico e Progresso (localStorage) ----
+const STORAGE_KEY_HISTORICO = 'nutricare_historico';
+const STORAGE_KEY_PROGRESSO = 'nutricare_progresso';
+
+function salvarConsulta() {
+  try {
+    const historico = JSON.parse(localStorage.getItem(STORAGE_KEY_HISTORICO) || '[]');
+    const entry = {
+      id: Date.now(),
+      data: new Date().toLocaleDateString('pt-BR'),
+      timestamp: new Date().toISOString(),
+      profile: { ...STATE.profile },
+      diagnostico: STATE.lastDiagnostico || '',
+      hasPlano: !!STATE.lastPlano
+    };
+    historico.unshift(entry);
+    if (historico.length > 20) historico.length = 20;
+    localStorage.setItem(STORAGE_KEY_HISTORICO, JSON.stringify(historico));
+
+    const peso = parseFloat(STATE.profile.weight);
+    if (peso) {
+      const progresso = JSON.parse(localStorage.getItem(STORAGE_KEY_PROGRESSO) || '[]');
+      const hoje = new Date().toDateString();
+      const jaExiste = progresso.some(p => new Date(p.data).toDateString() === hoje);
+      if (!jaExiste) {
+        progresso.push({ data: entry.timestamp, peso, objetivo: STATE.profile.goal || '' });
+        if (progresso.length > 100) progresso.length = 100;
+        localStorage.setItem(STORAGE_KEY_PROGRESSO, JSON.stringify(progresso));
+      }
+    }
+  } catch (e) {
+    console.warn('Erro ao salvar histórico:', e);
+  }
+}
+
+function carregarHistorico() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY_HISTORICO) || '[]'); }
+  catch { return []; }
+}
+
+function carregarProgresso() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY_PROGRESSO) || '[]'); }
+  catch { return []; }
+}
+
+function renderHistorico() {
+  const historico = carregarHistorico();
+  const cards = historico.length
+    ? historico.map(h => `
+      <div class="historico-card" onclick="dispatch('ver_consulta', '${h.id}')">
+        <div class="historico-card-top">
+          <span class="historico-data">${h.data}</span>
+          <span class="historico-objetivo">${escapeHtml(h.profile.goal || '')}</span>
+        </div>
+        <div class="historico-card-bottom">
+          <span class="historico-resumo">${h.profile.gender ? escapeHtml(h.profile.gender) + ' · ' : ''}${h.profile.age ? escapeHtml(h.profile.age) + ' anos' : ''}</span>
+          ${h.diagnostico ? '<span class="historico-tag">Concluída</span>' : '<span class="historico-tag">Incompleta</span>'}
+        </div>
+      </div>`).join('')
+    : '<div class="historico-empty">Nenhuma consulta anterior.</div>';
+
+  const c = document.getElementById('screen-container');
+  if (!c) return;
+  c.innerHTML = `
+    <div class="screen" style="padding:24px;overflow-y:auto;">
+      <header class="screen-header">
+        <button class="header-back" onclick="dispatch('voltar_menu')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M12 16L6 10L12 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <h2>Histórico</h2>
+        <div style="width:20px;"></div>
+      </header>
+      <div class="historico-lista">${cards}</div>
+      <button class="btn-primary" style="width:100%;margin-top:12px;" onclick="dispatch('iniciar_consulta')">+ Nova consulta</button>
+    </div>`;
+}
+
+function renderProgresso() {
+  const progresso = carregarProgresso();
+
+  const c2 = document.getElementById('screen-container');
+  if (!c2) return;
+  c2.innerHTML = `
+    <div class="screen" style="padding:24px;overflow-y:auto;">
+      <header class="screen-header">
+        <button class="header-back" onclick="dispatch('voltar_menu')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M12 16L6 10L12 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <h2>Meu Progresso</h2>
+        <div style="width:20px;"></div>
+      </header>
+      ${progresso.length < 2
+        ? `<div class="historico-empty" style="margin-top:40px;">
+            <p style="font-size:1.1rem;margin-bottom:8px;">Precisa de pelo menos 2 registros</p>
+            <p style="color:var(--gray-500);">Complete consultas com seu peso para ver gr&aacute;fico de evolu&ccedil;&atilde;o.</p>
+          </div>`
+        : `<div class="chart-card" style="height:300px;">
+            <canvas id="chart-progresso"></canvas>
+          </div>
+          <div style="margin-top:16px;">
+            <p style="font-weight:600;margin-bottom:8px;">Registros de peso:</p>
+            ${progresso.slice().reverse().map(p => `
+              <div class="progresso-row">
+                <span>${new Date(p.data).toLocaleDateString('pt-BR')}</span>
+                <span><strong>${p.peso} kg</strong></span>
+                <span style="color:var(--gray-500);font-size:0.85rem;">${p.objetivo ? escapeHtml(p.objetivo) : ''}</span>
+              </div>
+            `).join('')}
+          </div>`
+      }
+      <button class="btn-primary" style="width:100%;margin-top:12px;" onclick="dispatch('iniciar_consulta')">+ Nova consulta</button>
+    </div>`;
+
+  if (progresso.length >= 2) {
+    setTimeout(() => initProgressChart(progresso), 100);
+  }
+}
+
+function renderDetalheConsulta(consulta) {
+  if (!consulta) {
+    renderHistorico();
+    return;
+  }
+  const p = consulta.profile || {};
+  const c3 = document.getElementById('screen-container');
+  if (!c3) return;
+  c3.innerHTML = `
+    <div class="screen" style="padding:24px;overflow-y:auto;">
+      <header class="screen-header">
+        <button class="header-back" onclick="dispatch('ver_historico')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M12 16L6 10L12 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <h2>Consulta — ${consulta.data}</h2>
+        <div style="width:20px;"></div>
+      </header>
+      <div class="consulta-card">
+        <div class="consulta-card-header">Resumo</div>
+        <div class="consulta-card-body">
+          ${p.goal ? `<p>🎯 <strong>Objetivo:</strong> ${escapeHtml(p.goal)}</p>` : ''}
+          ${p.gender ? `<p>⚧️ <strong>Sexo:</strong> ${escapeHtml(p.gender)}</p>` : ''}
+          ${p.age ? `<p>🎂 <strong>Idade:</strong> ${escapeHtml(p.age)} anos</p>` : ''}
+          ${p.weight ? `<p>⚖️ <strong>Peso:</strong> ${escapeHtml(p.weight)} kg</p>` : ''}
+          ${p.height ? `<p>📏 <strong>Altura:</strong> ${escapeHtml(p.height)} cm</p>` : ''}
+          ${p.diet ? `<p>🥗 <strong>Alimentação:</strong> ${escapeHtml(p.diet)}</p>` : ''}
+          ${p.sleep ? `<p>😴 <strong>Sono:</strong> ${escapeHtml(p.sleep)}</p>` : ''}
+          ${p.activity ? `<p>🏃 <strong>Atividade:</strong> ${escapeHtml(p.activity)}</p>` : ''}
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:16px;">
+        <button class="btn-primary" onclick="dispatch('iniciar_consulta')">+ Nova consulta</button>
+        <button class="btn-outline" onclick="dispatch('ver_historico')">← Voltar ao histórico</button>
+      </div>
+    </div>`;
+}
+
+function initProgressChart(progresso) {
+  const canvas = document.getElementById('chart-progresso');
+  if (!canvas) return;
+  if (window._chartProgresso) window._chartProgresso.destroy();
+
+  const sorted = [...progresso].sort((a, b) => new Date(a.data) - new Date(b.data));
+  const labels = sorted.map(p => new Date(p.data).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }));
+  const pesos = sorted.map(p => p.peso);
+  const minPeso = Math.min(...pesos) - 2;
+  const maxPeso = Math.max(...pesos) + 2;
+
+  window._chartProgresso = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Peso (kg)',
+        data: pesos,
+        borderColor: '#52B788',
+        backgroundColor: 'rgba(82, 183, 136, 0.1)',
+        fill: true,
+        tension: 0.3,
+        pointBackgroundColor: '#2D6A4F',
+        pointRadius: 4,
+        pointHoverRadius: 6,
+        borderWidth: 2.5,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: { label: ctx => `${ctx.parsed.y} kg` }
+        }
+      },
+      scales: {
+        y: {
+          min: Math.floor(minPeso),
+          max: Math.ceil(maxPeso),
+          grid: { color: getChartColors().grid },
+          ticks: { color: getChartColors().tick, font: { size: 11 }, callback: v => v + ' kg' }
+        },
+        x: {
+          grid: { display: false },
+          ticks: { color: getChartColors().tick, font: { size: 10 } }
+        }
+      }
+    }
+  });
+}
 
 // Mapa de transições de tela baseado em ações do usuário
 const ACTION_ROUTES = {
   'iniciar_consulta': 'anamnese_step',
   'voltar_menu': 'onboarding',
+  'ver_historico': 'historico',
+  'ver_progresso': 'progresso',
+  'ver_consulta': 'detalhe_consulta',
   'voltar_planos': 'planos',
   'voltar_plano': 'plano',
   'voltar_acomp': 'acompanhamento',
@@ -738,7 +1239,11 @@ async function sendToBackend(profile) {
   console.log('📤 [NutriCare] Enviando dados para API...', {
     goal: profile.goal,
     sleep: profile.sleep,
-    activity: profile.activity
+    activity: profile.activity,
+    gender: profile.gender,
+    age: profile.age,
+    weight: profile.weight,
+    height: profile.height
   });
   try {
     const res = await fetch(`${API_URL}/consulta`, {
@@ -780,11 +1285,22 @@ function renderUserBubble() {
       <div class="message-avatar" style="margin-left: auto;">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="white" stroke-width="2"/><path d="M8 14C8 14 10 12 12 14C14 12 16 14 16 14" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M10 10L10 11" stroke="white" stroke-width="2" stroke-linecap="round"/><path d="M14 10L14 11" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
       </div>
-      <div class="message-bubble" style="background:var(--green-800);color:white;border-bottom-right-radius:4px;max-width:85%;margin-left:auto;"><p>${STATE.lastUserInput}</p></div>
+      <div class="message-bubble" style="background:var(--green-800);color:white;border-bottom-right-radius:4px;max-width:85%;margin-left:auto;"><p>${escapeHtml(STATE.lastUserInput)}</p></div>
     </div>`;
   STATE.lastUserInput = null;
   return html;
 }
+
+window.showMealDetail = function(idx) {
+  const meals = gerarRefeicoes(STATE.profile);
+  const meal = meals[idx];
+  if (!meal) return;
+  const receitas = gerarReceitasParaRefeicao(meal.name, STATE.profile.goal);
+  const container = $c('screen-container');
+  if (!container) return;
+  container.innerHTML = renderComponent({ type: 'meal_detail', meal, idx, receitas });
+  bindClicks(container);
+};
 
 function render(response) {
   if (!response) return;
@@ -818,6 +1334,8 @@ function render(response) {
         const result = await sendToBackend(STATE.profile);
         if (result && result.success) {
           STATE.plano = result.data;
+          STATE.lastDiagnostico = (result.data.diagnostico?.resumo || []).join(' · ') || STATE.profile.goal || '';
+          STATE.lastPlano = true;
           console.log('📊 [NutriCare] Plano carregado do backend');
         } else {
           console.log('💻 [NutriCare] Usando geração local (fallback)');
@@ -833,6 +1351,23 @@ function render(response) {
       container.innerHTML = renderNutritionCharts(response);
       bindClicks(container);
       initCharts();
+      salvarConsulta();
+      return;
+    case 'historico':
+      renderHistorico();
+      bindClicks(container);
+      return;
+    case 'progresso':
+      renderProgresso();
+      bindClicks(container);
+      return;
+    case 'detalhe_consulta':
+      renderDetalheConsulta(response.consulta);
+      bindClicks(container);
+      return;
+    case 'refeicao_detalhe':
+      container.innerHTML = renderComponent(response.components[0]);
+      bindClicks(container);
       return;
     default:
       container.innerHTML = renderChatScreen(response);
@@ -853,10 +1388,13 @@ function renderChatScreen(resp) {
           <svg width="24" height="24" viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="22" stroke="#2D6A4F" stroke-width="3"/><path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="#2D6A4F" stroke-width="2.5" stroke-linecap="round"/><path d="M18 20L18 22" stroke="#2D6A4F" stroke-width="2.5" stroke-linecap="round"/><path d="M30 20L30 22" stroke="#2D6A4F" stroke-width="2.5" stroke-linecap="round"/></svg>
           <span>NutriCare</span>
         </div>
-        <div class="header-progress"><span id="step-num">${STATE.anamneseStep + 1}</span>/7</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button id="theme-toggle-btn" class="header-theme-btn" onclick="toggleTheme()" title="Alternar tema">🌙</button>
+          <div class="header-progress"><span id="step-num">${Math.min(STATE.anamneseStep + 1, ANAMNESE_TOTAL_STEPS)}</span>/${ANAMNESE_TOTAL_STEPS}</div>
+        </div>
       </div>
       <div class="progress-bar-track">
-        <div class="progress-bar-fill" style="width:${((STATE.anamneseStep) / 7) * 100}%"></div>
+        <div class="progress-bar-fill" style="width:${Math.min((STATE.anamneseStep / ANAMNESE_TOTAL_STEPS) * 100, 100)}%"></div>
       </div>
     </header>` : '';
 
@@ -869,7 +1407,7 @@ function renderChatScreen(resp) {
         <div class="message-avatar">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="white" stroke-width="2"/><path d="M8 14C8 14 10 12 12 14C14 12 16 14 16 14" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M10 10L10 11" stroke="white" stroke-width="2" stroke-linecap="round"/><path d="M14 10L14 11" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
         </div>
-        <div class="message-bubble"><p>${STATE.lastUserInput}</p></div>
+        <div class="message-bubble"><p>${escapeHtml(STATE.lastUserInput)}</p></div>
       </div>`;
     STATE.lastUserInput = null;
   }
@@ -961,8 +1499,8 @@ function renderComponent(comp, screen) {
         <div class="input-text-wrapper" style="display:flex;gap:8px;padding:8px 0;">
           <input type="text" class="text-input" id="dynamic-text-input"
             placeholder="${comp.placeholder || 'Digite...'}"
-            data-action="${comp.action}" autocomplete="off">
-          <button class="send-btn" id="dynamic-send-btn" disabled>
+            autocomplete="off">
+          <button class="send-btn" id="dynamic-send-btn" data-action="${comp.action}" disabled>
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M4 10H16M16 10L11 5M16 10L11 15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           </button>
         </div>`;
@@ -1024,10 +1562,52 @@ function renderComponent(comp, screen) {
           <div class="supplement-info"><h4>${i.name}</h4><p>${i.reason}</p><span class="supplement-dosage">${i.dosage}</span></div>
         </div>`).join('')}</div>`;
 
+    case 'meal_detail': {
+      const m = comp.meal;
+      return `
+        <div class="screen" style="padding:24px;overflow-y:auto;height:100%;">
+          <header class="screen-header" style="margin-bottom:20px;">
+            <button class="header-back" onclick="dispatch('voltar_plano')">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M12 16L6 10L12 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            </button>
+            <div style="display:flex;align-items:center;gap:12px;">
+              <div style="width:40px;height:40px;border-radius:50%;background:var(--green-100);display:flex;align-items:center;justify-content:center;font-size:1.3rem;">${m.icon}</div>
+              <div>
+                <h2 style="margin:0;font-size:1.2rem;">${m.name}</h2>
+                <span style="font-size:0.85rem;color:var(--gray-400);">${m.time}</span>
+              </div>
+            </div>
+            <div style="width:20px;"></div>
+          </header>
+
+          <div class="meal-detail-opcoes">
+            <h3 style="font-size:1rem;color:var(--green-800);margin-bottom:12px;">🍽️ Opções</h3>
+            ${m.main.split('\n').map(op => `<div class="result-card" style="margin-bottom:8px;padding:12px 16px;">${op}</div>`).join('')}
+          </div>
+
+          ${m.subs ? `
+            <div class="meal-detail-subs" style="margin-top:16px;">
+              <h3 style="font-size:1rem;color:var(--green-800);margin-bottom:8px;">🔄 Substituições</h3>
+              <div class="meal-substitutions" style="padding:12px 16px;background:var(--green-50);border-radius:var(--radius-sm);">
+                <div class="meal-substitutions-text">${m.subs}</div>
+              </div>
+            </div>` : ''}
+
+          ${comp.receitas ? `
+            <div class="meal-detail-receitas" style="margin-top:16px;">
+              <h3 style="font-size:1rem;color:var(--green-800);margin-bottom:8px;">📖 Receitas sugeridas</h3>
+              ${comp.receitas}
+            </div>` : ''}
+
+          <div style="margin-top:20px;display:flex;gap:8px;">
+            <button class="btn-primary" style="flex:1;" onclick="dispatch('voltar_plano')">← Voltar ao plano</button>
+          </div>
+        </div>`;
+    }
     case 'meal_plan':
       return `<div class="result-section" style="margin-top:12px;"><div class="meal-plan">${comp.meals.map((m, idx) => `
         <div class="meal-card">
-          <div class="meal-header" onclick="toggleMealCard(this)">
+          <div class="meal-header" onclick="showMealDetail(${idx})">
             <div class="meal-header-left">
               <div class="meal-icon">${m.icon}</div>
               <div><div class="meal-name">${m.name}</div><div class="meal-time">${m.time}</div></div>
@@ -1037,6 +1617,10 @@ function renderComponent(comp, screen) {
           <div class="meal-body" style="max-height:0;overflow:hidden;transition:max-height 0.4s;">
             <div class="meal-description">${m.main.replace(/\n/g, '<br>')}</div>
             ${m.subs ? `<div class="meal-substitutions"><div class="meal-substitutions-label">🔄 Substituições</div><div class="meal-substitutions-text">${m.subs}</div></div>` : ''}
+            <div class="meal-receitas">
+              <div class="receitas-label">📖 Receitas sugeridas</div>
+              ${gerarReceitasParaRefeicao(m.name, STATE.profile.goal)}
+            </div>
           </div>
         </div>`).join('')}</div></div>`;
 
@@ -1073,7 +1657,7 @@ function renderOnboarding(resp) {
     <div class="screen" id="screen-onboarding">
       <div class="menu-container">
         <div class="menu-top">
-          <div class="menu-brand-badge">NutriCare</div>
+          <div class="menu-brand-badge">NutriCare <button class="header-theme-btn" style="position:static;margin-left:8px;" onclick="toggleTheme()" title="Alternar tema">🌙</button></div>
           <h1>${hero ? hero.title : ''}</h1>
           ${hero && hero.subtitle ? `<p class="menu-subtitle">${hero.subtitle}</p>` : ''}
         </div>
@@ -1191,7 +1775,7 @@ function renderNutritionCharts(resp) {
       <div class="charts-header">
         <div class="welcome-badge">Gráficos Nutricionais</div>
         <h2 style="margin-top:8px;">Análise do seu plano</h2>
-        <p class="charts-subtitle">Baseado no seu perfil — ${nd.totalCal} kcal/dia</p>
+        <p class="charts-subtitle">Baseado no seu perfil — ${nd.totalCal} kcal/dia${nd.tmb ? ` · TMB: ${nd.tmb} kcal` : ''}</p>
       </div>
 
       <!-- Card Resumo -->
@@ -1212,6 +1796,11 @@ function renderNutritionCharts(resp) {
           <span class="summary-value">${nd.fatG}g</span>
           <span class="summary-label">Gorduras</span>
         </div>
+        ${nd.tmb ? `
+        <div class="summary-item" style="border-left:2px solid var(--green-200);padding-left:12px;">
+          <span class="summary-value" style="font-size:13px;">${nd.tmb}</span>
+          <span class="summary-label">TMB (basal)</span>
+        </div>` : ''}
       </div>
 
       <!-- Gráfico 1: Distribuição de Calorias por Refeição -->
@@ -1289,13 +1878,165 @@ function renderNutritionCharts(resp) {
         </div>
       </div>
 
+      <button class="btn-outline" style="width:100%;" onclick="exportarPDF()">
+        📄 Exportar PDF
+      </button>
       ${resp.components.filter(c => c.type !== 'nutrition_charts').map(c => renderComponent(c, resp.screen)).join('')}
     </div>`;
+}
+
+// ---- Exportar PDF ----
+function exportarPDF() {
+  const p = STATE.profile;
+  const plano = STATE.plano || {};
+  const refeicoes = gerarRefeicoes(p);
+  const sups = gerarSuplementos(p);
+  const lista = gerarListaCompras(p);
+  const nd = calcularGET(p) ? gerarDadosNutricionais(p) : null;
+  const hoje = new Date().toLocaleDateString('pt-BR');
+
+  const refeicoesHtml = refeicoes.map(r => `
+    <tr>
+      <td class="print-icon">${r.icon}</td>
+      <td><strong>${r.name}</strong><br><small>${r.time}</small></td>
+      <td>${r.main.replace(/\n/g, '<br>')}</td>
+      <td style="font-size:11px;color:#666;">${r.subs}</td>
+    </tr>
+  `).join('');
+
+  const macrosHtml = nd ? `
+    <div class="print-section">
+      <h3>Informação Nutricional</h3>
+      <table class="print-table" style="width:auto;min-width:300px;">
+        <tr><td>Calorias totais</td><td><strong>${nd.totalCal} kcal</strong></td></tr>
+        <tr><td>Proteínas</td><td><strong>${nd.proteinG}g</strong> (${nd.protPorKg}g/kg)</td></tr>
+        <tr><td>Carboidratos</td><td><strong>${nd.carbG}g</strong></td></tr>
+        <tr><td>Gorduras</td><td><strong>${nd.fatG}g</strong></td></tr>
+        ${nd.tmb ? `<tr><td>TMB (basal)</td><td><strong>${nd.tmb} kcal</strong></td></tr>` : ''}
+        ${nd.get ? `<tr><td>GET (total)</td><td><strong>${nd.get} kcal</strong></td></tr>` : ''}
+      </table>
+    </div>` : '';
+
+  const listaHtml = `
+    <div class="print-section">
+      <h3>Lista de Compras</h3>
+      ${lista.map(cat => `
+        <h4 style="font-size:0.9rem;margin:8px 0 4px;">${cat.icon} ${cat.name}</h4>
+        <ul class="print-lista">
+          ${cat.items.map(item => `<li>${item}</li>`).join('')}
+        </ul>
+      `).join('')}
+    </div>`;
+
+  const supsHtml = sups.length ? `
+    <div class="print-section">
+      <h3>Suplementos Sugeridos</h3>
+      <ul>
+        ${sups.map(s => `<li><strong>${s.name}</strong>${s.dosage ? ' — ' + s.dosage : ''}${s.reason ? '<br><small>' + s.reason + '</small>' : ''}</li>`).join('')}
+      </ul>
+    </div>` : '';
+
+  const printWindow = window.open('', '_blank', 'width=800,height=600');
+  if (!printWindow) {
+    alert('Permita pop-ups para exportar o PDF.');
+    return;
+  }
+
+  printWindow.document.write(`
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+      <meta charset="UTF-8">
+      <title>Plano NutriCare - ${hoje}</title>
+      <style>
+        @page { margin: 1.5cm; size: A4; }
+        * { box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; color: #1a1a2e; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .print-logo { text-align: center; margin-bottom: 24px; }
+        .print-logo h1 { color: #2D6A4F; font-size: 1.6rem; margin: 0; }
+        .print-logo p { color: #666; font-size: 0.85rem; margin: 4px 0 0; }
+        .print-header { background: linear-gradient(135deg, #2D6A4F, #40916C); color: white; padding: 20px 24px; border-radius: 12px; margin-bottom: 20px; }
+        .print-header h2 { margin: 0 0 8px; font-size: 1.2rem; }
+        .print-header p { margin: 2px 0; font-size: 0.9rem; opacity: 0.9; }
+        .print-section { margin-bottom: 20px; }
+        .print-section h3 { color: #2D6A4F; border-bottom: 2px solid #D8F3DC; padding-bottom: 6px; margin-bottom: 12px; font-size: 1rem; }
+        table.print-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        table.print-table th, table.print-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+        table.print-table th { background: #f0fdf4; font-weight: 600; color: #2D6A4F; }
+        table.print-table tr:last-child td { border-bottom: none; }
+        .print-icon { font-size: 1.3rem; text-align: center; width: 36px; }
+        ul { margin: 0; padding-left: 20px; }
+        ul li { margin-bottom: 4px; font-size: 0.9rem; }
+        .print-lista { columns: 2; column-gap: 24px; }
+        .print-lista li { break-inside: avoid; }
+        .print-footer { text-align: center; margin-top: 30px; padding-top: 16px; border-top: 1px solid #e2e8f0; font-size: 0.8rem; color: #94a3b8; }
+        @media print {
+          body { padding: 0; }
+          .no-print { display: none; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="print-logo">
+        <h1>🥗 NutriCare</h1>
+        <p>Plano Alimentar Personalizado</p>
+      </div>
+
+      <div class="print-header">
+        <h2>Plano Alimentar — ${hoje}</h2>
+        <p>🎯 Objetivo: ${escapeHtml(p.goal || 'Não informado')}</p>
+        ${p.gender ? '<p>⚧️ ' + escapeHtml(p.gender) + (p.age ? ' · ' + escapeHtml(p.age) + ' anos' : '') + '</p>' : ''}
+        ${p.weight ? '<p>⚖️ ' + escapeHtml(p.weight) + ' kg' + (p.height ? ' · ' + escapeHtml(p.height) + ' cm' : '') + '</p>' : ''}
+      </div>
+
+      <div class="print-section">
+        <h3>🥗 Refeições</h3>
+        <table class="print-table">
+          <thead><tr><th></th><th>Refeição</th><th>Opções</th><th>Substituições</th></tr></thead>
+          <tbody>${refeicoesHtml}</tbody>
+        </table>
+      </div>
+
+      ${macrosHtml}
+      ${listaHtml}
+      ${supsHtml}
+
+      <div class="print-footer">
+        <p>Gerado por NutriCare em ${hoje} · Consulte um nutricionista para acompanhamento profissional.</p>
+      </div>
+
+      <button class="no-print" onclick="window.print()" style="display:block;margin:20px auto;padding:10px 24px;background:#2D6A4F;color:white;border:none;border-radius:8px;font-size:1rem;cursor:pointer;">
+        🖨️ Imprimir / Salvar PDF
+      </button>
+      <button class="no-print" onclick="window.close()" style="display:block;margin:10px auto;padding:8px 16px;background:#e2e8f0;color:#333;border:none;border-radius:8px;font-size:0.9rem;cursor:pointer;">
+        ✕ Fechar
+      </button>
+
+      <script>
+        // Auto-print after a brief delay for rendering
+        setTimeout(function() {
+          if (window.matchMedia('print').matches) { window.print(); }
+        }, 500);
+      </script>
+    </body>
+    </html>
+  `);
+  printWindow.document.close();
 }
 
 function getMealColor(index) {
   const colors = ['#22C55E', '#F59E0B', '#3B82F6', '#A855F7', '#EF4444'];
   return colors[index % colors.length];
+}
+
+// ---- Chart Helpers (Dark Mode aware) ----
+function getChartColors() {
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  return {
+    grid: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)',
+    tick: isDark ? '#94A3B8' : '#6B7280',
+    border: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.1)'
+  };
 }
 
 function initCharts() {
@@ -1338,12 +2079,12 @@ function initCharts() {
       scales: {
         y: {
           beginAtZero: true,
-          grid: { color: 'rgba(0,0,0,0.05)' },
-          ticks: { font: { size: 11 } }
+          grid: { color: getChartColors().grid },
+          ticks: { color: getChartColors().tick, font: { size: 11 } }
         },
         x: {
           grid: { display: false },
-          ticks: { font: { size: 10 } }
+          ticks: { color: getChartColors().tick, font: { size: 10 } }
         }
       }
     }
@@ -1383,6 +2124,7 @@ function initCharts() {
         legend: {
           position: 'bottom',
           labels: {
+            color: getChartColors().tick,
             padding: 16,
             usePointStyle: true,
             font: { size: 12, weight: '600' }
@@ -1403,7 +2145,8 @@ function initCharts() {
 // ---- Bind Clicks (replacement for bindActions) ----
 function bindClicks(container) {
   container.querySelectorAll('[data-action]').forEach(el => {
-    el.addEventListener('click', () => {
+    if (el.id === 'dynamic-send-btn') return; // handled separately with validation
+    el.addEventListener('click', (e) => {
       // Save user's option text for bubble rendering
       if (el.classList.contains('option-btn') || el.classList.contains('followup-btn')) {
         STATE.lastUserInput = el.textContent.trim();
@@ -1416,11 +2159,31 @@ function bindClicks(container) {
   const textInput = container.querySelector('#dynamic-text-input');
   const sendBtn = container.querySelector('#dynamic-send-btn');
   if (textInput && sendBtn) {
-    const action = textInput.dataset.action;
-    textInput.addEventListener('input', () => { sendBtn.disabled = !textInput.value.trim(); });
+    const action = sendBtn.dataset.action;
+    textInput.addEventListener('input', () => {
+      sendBtn.disabled = textInput.value.trim().length < 3;
+      textInput.style.borderColor = textInput.value.trim().length >= 3 ? 'var(--green-600)' : '';
+    });
+    const mostrarErro = (msg) => {
+      textInput.style.borderColor = '#EF4444';
+      textInput.style.animation = 'shake 0.3s';
+      let errEl = container.querySelector('.text-input-error');
+      if (!errEl) {
+        errEl = document.createElement('div');
+        errEl.className = 'text-input-error';
+        errEl.style.cssText = 'color:#EF4444;font-size:0.8rem;margin-top:4px;';
+        textInput.parentNode.appendChild(errEl);
+      }
+      errEl.textContent = msg;
+      setTimeout(() => {
+        textInput.style.animation = '';
+        if (errEl) errEl.textContent = '';
+      }, 2000);
+    };
     const submit = () => {
       const val = textInput.value.trim();
-      if (!val) return;
+      if (!val) { mostrarErro('⚠️ Preencha este campo antes de continuar'); return; }
+      if (val.length < 3) { mostrarErro('⚠️ Digite pelo menos 3 caracteres'); return; }
       dispatch(action, val);
     };
     sendBtn.addEventListener('click', submit);
@@ -1473,8 +2236,29 @@ window.toggleMealCard = function(header) {
   const toggle = header.querySelector('.meal-toggle');
   if (body) {
     const isOpen = body.style.maxHeight !== '0px' && body.style.maxHeight !== '';
-    body.style.maxHeight = isOpen ? '0' : '500px';
-    body.style.padding = isOpen ? '0 20px 0' : '0 20px 20px';
+    if (isOpen) {
+      body.style.maxHeight = '0';
+      body.style.padding = '0 20px 0';
+    } else {
+      body.style.maxHeight = body.scrollHeight + 20 + 'px';
+      body.style.padding = '0 20px 20px';
+    }
+    if (toggle) toggle.classList.toggle('open');
+  }
+};
+
+window.toggleReceita = function(header) {
+  const body = header.nextElementSibling;
+  const toggle = header.querySelector('.receita-toggle');
+  if (body) {
+    const isOpen = body.style.maxHeight !== '0px' && body.style.maxHeight !== '';
+    if (isOpen) {
+      body.style.maxHeight = '0';
+      body.style.padding = '0 16px 0';
+    } else {
+      body.style.maxHeight = body.scrollHeight + 20 + 'px';
+      body.style.padding = '0 16px 16px';
+    }
     if (toggle) toggle.classList.toggle('open');
   }
 };
@@ -1526,7 +2310,50 @@ window.toggleShopCategory = function(el) {
 };
 
 // ---- Init ----
+// ---- Dark Mode Toggle ----
+function toggleTheme() {
+  const html = document.documentElement;
+  const isDark = html.getAttribute('data-theme') === 'dark';
+  html.setAttribute('data-theme', isDark ? 'light' : 'dark');
+  localStorage.setItem('nutricare_theme', isDark ? 'light' : 'dark');
+  // Atualizar ícone do botão se ele existir
+  document.querySelectorAll('#theme-toggle-btn, .menu-brand-badge .header-theme-btn').forEach(btn => {
+    btn.textContent = isDark ? '🌙' : '☀️';
+  });
+  // Recriar gráficos se existem
+  if (window._chartMeals || window._chartMacros) {
+    setTimeout(initCharts, 50);
+  }
+}
+
+function initTheme() {
+  const saved = localStorage.getItem('nutricare_theme');
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const isDark = saved === 'dark' || (!saved && prefersDark);
+  if (isDark) {
+    document.documentElement.setAttribute('data-theme', 'dark');
+  }
+  // Atualizar ícone dos botões de tema (se já existirem no DOM)
+  document.querySelectorAll('#theme-toggle-btn, .menu-brand-badge .header-theme-btn').forEach(btn => {
+    btn.textContent = isDark ? '☀️' : '🌙';
+  });
+}
+
+// ---- PWA: Service Worker ----
+function registerSW() {
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').then(reg => {
+      console.log('📦 [PWA] Service Worker registrado:', reg.scope);
+    }).catch(err => {
+      console.warn('⚠️ [PWA] Falha ao registrar SW:', err);
+    });
+  }
+}
+
+// ---- Inicialização ----
 window.addEventListener('DOMContentLoaded', () => {
+  initTheme();
+  registerSW();
   setTimeout(() => {
     dispatch(null, null);
     const loading = $c('loading-screen');

@@ -42,6 +42,77 @@
     --transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* ===== Dark Mode ===== */
+[data-theme="dark"] {
+    --green-900: #6EE7B7;
+    --green-800: #52B788;
+    --green-700: #40916C;
+    --green-600: #52B788;
+    --green-500: #6EE7B7;
+    --green-200: #065F46;
+    --green-100: #064E3B;
+    --green-50: #022C22;
+
+    --gray-900: #F1F5F9;
+    --gray-800: #E2E8F0;
+    --gray-700: #CBD5E1;
+    --gray-600: #94A3B8;
+    --gray-500: #64748B;
+    --gray-400: #475569;
+    --gray-300: #334155;
+    --gray-200: #1E293B;
+    --gray-100: #1A2332;
+    --gray-50: #0F172A;
+
+    --white: #1A2332;
+
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
+    --shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+
+[data-theme="dark"] body {
+    background: linear-gradient(135deg, #0F172A 0%, #1A2332 100%);
+}
+
+[data-theme="dark"] #app {
+    background-image: radial-gradient(ellipse at top, rgba(6, 78, 59, 0.15), transparent 60%);
+}
+
+/* Theme Toggle Button */
+.header-theme-btn {
+    background: none;
+    border: 1.5px solid var(--gray-300);
+    border-radius: 50%;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 15px;
+    transition: var(--transition);
+    flex-shrink: 0;
+    line-height: 1;
+    padding: 0;
+}
+
+.header-theme-btn:hover {
+    border-color: var(--green-600);
+    background: var(--green-50);
+    transform: scale(1.1);
+}
+
+[data-theme="dark"] .header-theme-btn {
+    border-color: var(--gray-400);
+}
+
+[data-theme="dark"] .header-theme-btn:hover {
+    border-color: var(--green-500);
+    background: var(--green-100);
+}
+
 html {
     font-size: 16px;
     scroll-behavior: smooth;
@@ -869,6 +940,13 @@ h1 {
 @keyframes fadeIn {
     from { opacity: 0; }
     to { opacity: 1; }
+}
+@keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-6px); }
+    40% { transform: translateX(6px); }
+    60% { transform: translateX(-4px); }
+    80% { transform: translateX(4px); }
 }
 
 @keyframes messageIn {
@@ -1926,4 +2004,405 @@ h1 {
         width: 80px;
         font-size: 0.8rem;
     }
+}
+
+/* ===== Design Responsivo ===== */
+@media (min-width: 768px) {
+    #app {
+        max-width: 720px;
+        margin: 20px auto;
+        min-height: calc(100vh - 40px);
+        border-radius: var(--radius-xl);
+    }
+
+    body {
+        background: linear-gradient(135deg, var(--green-50) 0%, #D8F3DC 100%);
+        padding: 0;
+    }
+
+    [data-theme="dark"] body {
+        background: linear-gradient(135deg, #0F172A 0%, #1A2332 100%);
+    }
+
+    .menu-container {
+        padding: 48px 40px;
+    }
+
+    .menu-actions {
+        max-width: 400px;
+        margin: 0 auto;
+    }
+
+    .chat-container {
+        padding: 20px 32px;
+    }
+
+    .message {
+        max-width: 80%;
+    }
+
+    /* Plano alimentar em grid */
+    .plan-accordion {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+    }
+
+    .plan-accordion > *:nth-child(5) {
+        grid-column: 1 / -1;
+    }
+
+    .chart-card {
+        padding: 24px;
+    }
+
+    .nutrition-summary {
+        grid-template-columns: repeat(5, 1fr);
+        padding: 20px;
+    }
+
+    .charts-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+    }
+
+    .charts-grid .chart-card:first-child,
+    .charts-grid .chart-card:last-child {
+        grid-column: 1 / -1;
+    }
+
+    .consulta-diagnostico {
+        padding: 24px 32px;
+    }
+
+    .screen[style*="padding:24px"] {
+        padding: 32px 40px !important;
+    }
+
+    .header-progress {
+        font-size: 0.85rem;
+    }
+}
+
+@media (min-width: 1024px) {
+    #app {
+        max-width: 860px;
+        margin: 30px auto;
+        min-height: calc(100vh - 60px);
+    }
+
+    .message {
+        max-width: 70%;
+    }
+
+    .plan-accordion {
+        grid-template-columns: repeat(3, 1fr);
+    }
+
+    .plan-accordion > *:nth-child(5) {
+        grid-column: auto;
+    }
+
+    .nutrition-summary {
+        padding: 24px 32px;
+    }
+
+    body {
+        padding: 0 16px;
+    }
+}
+
+/* Acessibilidade - foco visível */
+*:focus-visible {
+    outline: 2px solid var(--green-600);
+    outline-offset: 2px;
+}
+
+/* Transição suave para troca de tema */
+#app,
+body,
+.screen,
+.card,
+.chart-card,
+.message,
+input,
+textarea,
+button,
+.plan-card,
+.nutrition-summary,
+.summary-item {
+    transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* ===== Impressão ===== */
+@media print {
+    body { background: white !important; }
+    #app { max-width: 100% !important; box-shadow: none !important; margin: 0 !important; min-height: auto !important; border-radius: 0 !important; }
+    .chart-card canvas { max-height: 200px; }
+    .btn-primary, .btn-outline, .welcome-badge, .header-back, .header-theme-btn, .header-progress { display: none !important; }
+    .screen { padding: 0 !important; overflow: visible !important; }
+    .result-header { padding-top: 0 !important; }
+    .card { break-inside: avoid; page-break-inside: avoid; }
+    .consulta-card { break-inside: avoid; }
+    .nutrition-summary { border: 1px solid #ddd !important; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+    }
+}
+
+/* ===== Histórico ===== */
+.screen-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--gray-200);
+}
+
+.screen-header h2 {
+    font-size: 1.15rem;
+    font-weight: 700;
+    flex: 1;
+    margin: 0;
+}
+
+.historico-lista {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.historico-card {
+    background: var(--white);
+    border: 1px solid var(--gray-200);
+    border-radius: var(--radius-md);
+    padding: 14px 16px;
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.historico-card:hover {
+    border-color: var(--green-200);
+    box-shadow: var(--shadow-sm);
+    transform: translateY(-1px);
+}
+
+.historico-card-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.historico-data {
+    font-size: 0.8rem;
+    color: var(--gray-500);
+    font-weight: 500;
+}
+
+.historico-objetivo {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--green-700);
+}
+
+.historico-card-bottom {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.historico-resumo {
+    font-size: 0.8rem;
+    color: var(--gray-500);
+}
+
+.historico-tag {
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    border-radius: 99px;
+    background: var(--green-50);
+    color: var(--green-700);
+    font-weight: 500;
+}
+
+.historico-empty {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--gray-500);
+    font-size: 0.95rem;
+}
+
+/* ===== Progresso ===== */
+.progresso-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--gray-100);
+    font-size: 0.9rem;
+}
+
+.progresso-row:last-child {
+    border-bottom: none;
+}
+
+[data-theme="dark"] .progresso-row {
+    border-bottom-color: var(--gray-300);
+}
+
+[data-theme="dark"] .screen-header {
+    border-bottom-color: var(--gray-300);
+}
+
+/* ===== Receitas ===== */
+.meal-receitas {
+    margin-top: 12px;
+    padding-top: 8px;
+}
+
+.receitas-label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--green-700);
+    margin-bottom: 8px;
+}
+
+.receita-card {
+    border: 1px solid var(--gray-200);
+    border-radius: var(--radius-sm);
+    margin-bottom: 8px;
+    overflow: hidden;
+    background: var(--gray-50);
+}
+
+.receita-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.receita-header:hover {
+    background: var(--green-50);
+}
+
+.receita-nome {
+    flex: 1;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--gray-900);
+}
+
+.receita-tempo {
+    font-size: 0.75rem;
+    color: var(--gray-500);
+    background: var(--gray-100);
+    padding: 2px 8px;
+    border-radius: 99px;
+    white-space: nowrap;
+}
+
+.receita-toggle {
+    flex-shrink: 0;
+    transition: transform 0.3s ease;
+    color: var(--gray-500);
+}
+
+.receita-toggle.open {
+    transform: rotate(180deg);
+}
+
+.receita-body {
+    padding: 0 16px;
+}
+
+.receita-section {
+    margin-bottom: 10px;
+}
+
+.receita-section strong {
+    font-size: 0.8rem;
+    color: var(--gray-700);
+    display: block;
+    margin-bottom: 4px;
+}
+
+.receita-ingredientes {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 0.8rem;
+    color: var(--gray-600);
+    list-style: disc;
+}
+
+.receita-ingredientes li {
+    margin-bottom: 2px;
+}
+
+.receita-preparo {
+    margin: 0;
+    padding-left: 0;
+    list-style: none;
+    counter-reset: passo;
+}
+
+.receita-preparo li {
+    display: flex;
+    gap: 8px;
+    font-size: 0.8rem;
+    color: var(--gray-600);
+    margin-bottom: 6px;
+    line-height: 1.5;
+}
+
+.receita-passo-num {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    background: var(--green-100);
+    color: var(--green-700);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 700;
+}
+
+.receita-dicas {
+    background: var(--green-50);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    font-size: 0.8rem;
+    color: var(--green-700);
+    margin-top: 8px;
+    line-height: 1.4;
+}
+
+[data-theme="dark"] .receita-card {
+    background: var(--gray-300);
+    border-color: var(--gray-400);
+}
+
+[data-theme="dark"] .receita-header:hover {
+    background: var(--gray-200);
+}
+
+[data-theme="dark"] .receita-dicas {
+    background: var(--gray-200);
+}
+
+[data-theme="dark"] .receita-passo-num {
+    background: var(--green-200);
 }
