@@ -1224,9 +1224,9 @@ function gerarSuplementos(p) {
 }
 
 // ---- Constants ----
-const API_URL = window.location.protocol === 'file:'
+const API_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
   ? 'http://localhost:3001/api'
-  : `${window.location.protocol}//${window.location.hostname}:3001/api`;
+  : 'https://nutricare-api.onrender.com/api';
 
 const ANAMNESE_TOTAL_STEPS = 6; // Perguntas básicas (gratuitas)
 const ANAMNESE_EXTRA_TOTAL = 8; // Perguntas extras (premium)
@@ -1536,16 +1536,55 @@ function getPremiumEmail() {
 
 async function iniciarCheckoutPremium() {
   const container = document.getElementById('screen-container');
+  const isProduction = window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
+
   container.innerHTML = `
     <div class="screen" style="display:flex;align-items:center;justify-content:center;background:var(--bg-deep);">
       <div style="text-align:center;padding:40px;">
         <div style="animation:spin 1.2s linear infinite;margin-bottom:20px;width:40px;height:40px;border:3px solid rgba(0,214,143,0.15);border-top-color:var(--accent-500);border-radius:50%;margin:0 auto 20px;"></div>
-        <p style="color:var(--text-secondary);font-size:0.9rem;">Redirecionando para pagamento...</p>
+        <p style="color:var(--text-secondary);font-size:0.9rem;">Conectando ao servidor...</p>
+        ${isProduction ? '<p style="color:var(--text-tertiary);font-size:0.75rem;margin-top:12px;">Aguarde, servidor pode levar até 30s para iniciar...</p>' : ''}
       </div>
     </div>`;
+
+  // 1. Health check — timeout maior na produção (Render cold start ~30s)
+  const timeoutMs = isProduction ? 35000 : 500;
+  const saudavel = await fetch(`${API_URL}/health`, {
+    signal: AbortSignal.timeout(timeoutMs)
+  }).then(r => r.ok).catch(() => false);
+
+  if (!saudavel) {
+    if (isProduction) {
+      container.innerHTML = `<div class="screen" style="display:flex;align-items:center;justify-content:center;padding:40px;background:var(--bg-deep);">
+        <div style="text-align:center;max-width:380px;">
+          <p style="font-size:3rem;margin-bottom:12px;">⏳</p>
+          <h2 style="font-size:1.3rem;margin-bottom:8px;">Servidor temporariamente indisponível</h2>
+          <p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:6px;">O servidor pode estar reiniciando. Tente novamente em alguns instantes.</p>
+          <p style="color:var(--text-tertiary);font-size:0.8rem;margin-bottom:16px;">Se o problema persistir, entre em contato pelo WhatsApp.</p>
+          <button class="btn-primary" onclick="dispatch('ver_planos')">Voltar</button>
+        </div>
+      </div>`;
+    } else {
+      container.innerHTML = `<div class="screen" style="display:flex;align-items:center;justify-content:center;padding:40px;background:var(--bg-deep);">
+        <div style="text-align:center;max-width:380px;">
+          <p style="font-size:3rem;margin-bottom:12px;">🔌</p>
+          <h2 style="font-size:1.3rem;margin-bottom:8px;">Servidor offline</h2>
+          <p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:6px;">O servidor da API não está respondendo.</p>
+          <p style="color:var(--text-tertiary);font-size:0.8rem;margin-bottom:16px;">Para usar o Premium, execute o <strong>iniciar.bat</strong> e aguarde os dois servidores iniciarem.</p>
+          <p style="color:var(--accent-500);font-size:0.75rem;margin-bottom:20px;background:rgba(0,214,143,0.1);padding:10px;border-radius:8px;">
+            📱 No celular: use o IP do computador (ex: http://192.168.x.x:3000) em vez de localhost
+          </p>
+          <button class="btn-primary" onclick="dispatch('ver_planos')">Voltar</button>
+        </div>
+      </div>`;
+    }
+    return;
+  }
+
+  // 2. Servidor online — prossegue com o checkout
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    const timeout = setTimeout(() => controller.abort(), isProduction ? 30000 : 15000);
     const res = await fetch(`${API_URL}/create-checkout-session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1578,14 +1617,14 @@ async function iniciarCheckoutPremium() {
   } catch (err) {
     console.error('❌ Erro checkout:', err);
     const msg = err.name === 'AbortError'
-      ? 'Tempo limite excedido. Verifique se o servidor está rodando.'
+      ? 'Tempo limite excedido. O servidor demorou muito para responder.'
       : 'Servidor offline. Verifique se a API está rodando.';
     container.innerHTML = `<div class="screen" style="display:flex;align-items:center;justify-content:center;padding:40px;background:var(--bg-deep);">
-      <div style="text-align:center;max-width:360px;">
+      <div style="text-align:center;max-width:380px;">
         <p style="font-size:2rem;margin-bottom:12px;">❌</p>
         <p style="color:var(--text-secondary);font-size:0.9rem;">${msg}</p>
         <p style="color:var(--text-tertiary);font-size:0.75rem;margin:8px 0;">Dica: execute <strong>iniciar.bat</strong> para rodar o servidor</p>
-        <button class="btn-secondary" style="margin-top:16px;" onclick="dispatch('voltar_planos')">Voltar</button>
+        <button class="btn-secondary" style="margin-top:16px;" onclick="dispatch('ver_planos')">Voltar</button>
       </div>
     </div>`;
   }

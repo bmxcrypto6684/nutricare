@@ -55,7 +55,11 @@ app.use('/api/', apiLimiter);
 // ---- Middleware ----
 const CORS_ORIGINS = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',')
-  : [/^http:\/\/localhost(:\d+)?$/, 'https://johnnmacedo.github.io'];
+  : [
+      /^http:\/\/localhost(:\d+)?$/,
+      'https://johnnmacedo.github.io',
+      'https://nutricare-api.onrender.com'
+    ];
 app.use(cors({ origin: CORS_ORIGINS, methods: ['GET', 'POST'] }));
 app.use(express.json({ limit: '500kb' })); // reduzido de 10mb para 500kb
 app.use(morgan('\x1b[36m:method\x1b[0m :url \x1b[33m:status\x1b[0m \x1b[90m:response-time ms\x1b[0m'));

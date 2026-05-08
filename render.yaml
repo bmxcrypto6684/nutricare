@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: nutricare-api
+    env: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BASE_URL
+        value: https://johnnmacedo.github.io/projeto-nutricao
+      - key: CORS_ORIGINS
+        value: https://johnnmacedo.github.io
+      - key: STRIPE_SECRET_KEY
+        sync: false
