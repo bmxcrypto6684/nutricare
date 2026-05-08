@@ -1245,17 +1245,22 @@ async function sendToBackend(profile) {
     weight: profile.weight,
     height: profile.height
   });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
   try {
     const res = await fetch(`${API_URL}/consulta`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(profile)
+      body: JSON.stringify(profile),
+      signal: controller.signal
     });
+    clearTimeout(timeout);
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     const result = await res.json();
     console.log('✅ [NutriCare] Resposta da API recebida', result.meta);
     return result;
   } catch (err) {
+    clearTimeout(timeout);
     console.warn('⚠️ [NutriCare] API indisponível, usando geração local:', err.message);
     return null;
   }
