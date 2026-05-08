@@ -16,6 +16,8 @@ const STATE = {
     motivation: 3, extraInfo: ''
   },
   anamneseStep: 0,
+  anamneseExtraStep: 0,
+  chatPremiumStep: 0,
   plano: null
 };
 
@@ -26,7 +28,10 @@ function engine(action, payload) {
   switch (STATE.screen) {
 
     // ============================
-    case 'onboarding':
+    case 'onboarding': {
+      const btnProgresso = isPremium()
+        ? [{ text: '📈 Meu Progresso', action: 'ver_progresso', variant: 'outline' }]
+        : [];
       return {
         screen: 'onboarding',
         message: '',
@@ -35,7 +40,7 @@ function engine(action, payload) {
           { type: 'buttons', items: [
             { text: '▶️ Iniciar consulta', action: 'iniciar_consulta', variant: 'primary' },
             { text: '🗂️ Histórico', action: 'ver_historico', variant: 'outline' },
-            { text: '📈 Meu Progresso', action: 'ver_progresso', variant: 'outline' },
+            ...btnProgresso,
             { text: 'ℹ️ Como funciona', action: 'como_funciona', variant: 'outline' },
             { text: '💰 Ver planos', action: 'ver_planos', variant: 'outline' }
           ]}
@@ -46,6 +51,7 @@ function engine(action, payload) {
           { id: 'ver_planos', next: 'planos' }
         ]
       };
+    }
 
     // ============================
     case 'how_it_works':
@@ -98,13 +104,14 @@ function engine(action, payload) {
                 { text: 'Acompanhamento contínuo', included: true },
                 { text: 'Suporte por chat', included: true }
               ],
-              action: 'falar_contato'
+              action: 'assinar_premium'
             }
           ]}
         ],
         actions: [
           { id: 'voltar_menu', next: 'onboarding' },
           { id: 'iniciar_consulta', next: 'anamnese_step' },
+          { id: 'assinar_premium', next: 'assinar_premium' },
           { id: 'falar_contato', next: 'contato' }
         ]
       };
@@ -189,6 +196,152 @@ function engine(action, payload) {
     }
 
     // ============================
+    case 'anamnese_extra': {
+      if (!isPremium()) return { screen: 'premium_block' };
+
+      const step = STATE.anamneseExtraStep;
+
+      if (action && action.startsWith('ans_extra_')) {
+        const val = action.replace('ans_extra_', '');
+        const keyMap = {
+          'diet_lowcarb': 'preferredDiet', 'diet_med': 'preferredDiet', 'diet_balanced': 'preferredDiet', 'diet_any': 'preferredDiet',
+          'cook_yes': 'cookingStyle', 'cook_no': 'cookingStyle', 'cook_sometimes': 'cookingStyle',
+          'meal_fast': 'mealSpeed', 'meal_elaborate': 'mealSpeed', 'meal_both': 'mealSpeed',
+          'digest_yes': 'digestiveIssues', 'digest_no': 'digestiveIssues',
+          'water_less': 'waterIntake', 'water_mid': 'waterIntake', 'water_more': 'waterIntake',
+          'sleep_good': 'sleep', 'sleep_mid': 'sleep', 'sleep_bad': 'sleep',
+          'exams_yes': 'hasExams', 'exams_no': 'hasExams'
+        };
+        const valueMap = {
+          'diet_lowcarb': 'Low carb', 'diet_med': 'Mediterrânea', 'diet_balanced': 'Equilibrada', 'diet_any': 'Tanto faz',
+          'cook_yes': 'Sim, cozinho', 'cook_no': 'Não cozinho', 'cook_sometimes': 'Às vezes',
+          'meal_fast': 'Rápidas', 'meal_elaborate': 'Elaboradas', 'meal_both': 'Ambos',
+          'digest_yes': 'Sim', 'digest_no': 'Não',
+          'water_less': 'Menos de 1L', 'water_mid': '1-2L', 'water_more': 'Mais de 2L',
+          'sleep_good': 'Bom', 'sleep_mid': 'Médio', 'sleep_bad': 'Ruim',
+          'exams_yes': 'Sim', 'exams_no': 'Não'
+        };
+
+        if (keyMap[val]) {
+          STATE.profile[keyMap[val]] = valueMap[val] || val;
+        }
+
+        STATE.anamneseExtraStep++;
+        if (STATE.anamneseExtraStep >= ANAMNESE_EXTRA_TOTAL) {
+          STATE.anamneseExtraStep = 0;
+          return showFirstChatPremiumStep();
+        }
+        return showAnamneseExtraQuestion(STATE.anamneseExtraStep);
+      }
+
+      // Text input for free-text questions
+      if (action === 'ans_extra_text') {
+        STATE.profile.favFoods = payload || '';
+        STATE.anamneseExtraStep++;
+        if (STATE.anamneseExtraStep >= ANAMNESE_EXTRA_TOTAL) {
+          STATE.anamneseExtraStep = 0;
+          return showFirstChatPremiumStep();
+        }
+        return showAnamneseExtraQuestion(STATE.anamneseExtraStep);
+      }
+
+      return showAnamneseExtraQuestion(0);
+    }
+
+    // ============================
+    case 'chat_premium': {
+      if (!isPremium()) return { screen: 'premium_block' };
+
+      const step = STATE.chatPremiumStep ?? 0;
+      const CHAT_TOTAL = 6;
+
+      const goal = STATE.profile.goal || '';
+      const sleep = STATE.profile.sleep || '';
+      const activity = STATE.profile.activity || '';
+      const dietPref = STATE.profile.preferredDiet || '';
+      const waterIntake = STATE.profile.waterIntake || '';
+      const cookingStyle = STATE.profile.cookingStyle || '';
+      const favFoods = STATE.profile.favFoods || '';
+
+      const steps = [
+        // Step 0: Intro
+        () => ({
+          msg: `👋 <strong>Ótimo!</strong> Agora vou te fazer algumas perguntas rápidas para<br>deixar seu plano ainda mais personalizado.`,
+          btns: [{ text: 'Continuar 👍', action: 'chat_continue_0' }]
+        }),
+        // Step 1: Goal feedback
+        () => ({
+          msg: goal.includes('perder') || goal.includes('emagrec') || goal === 'Emagrecimento'
+            ? `🔥 Seu objetivo é <strong>${goal}</strong>. Uma dica importante: combine déficit calórico moderado com aumento de proteínas para preservar massa magra. Vou considerar isso no seu plano!`
+            : goal.includes('massa') || goal.includes('muscular')
+            ? `💪 Foco em <strong>${goal}</strong>! Vou priorizar proteínas magras e carboidratos complexos nas refeições pós-treino.`
+            : `🌿 <strong>${goal}</strong> é uma excelente meta! Vou montar um plano equilibrado que se encaixa no seu dia a dia.`,
+          btns: [{ text: 'Entendi! ✅', action: 'chat_continue_1' }]
+        }),
+        // Step 2: Personal tip based on profile
+        () => {
+          let tip = '';
+          if (activity === 'Sedentário') {
+            tip = '🚶 Você está sedentário. Que tal começar com <strong>caminhadas leves de 20 min</strong> após o almoço? Já ajuda na digestão e no metabolismo.';
+          } else if (activity === 'Intenso') {
+            tip = `⚡ Atividade <strong>${activity}</strong>! Vou incluir carboidratos de qualidade pra te dar energia nos treinos.`;
+          } else {
+            tip = `🏃 Atividade <strong>${activity}</strong> é ótimo! Vou ajustar as porções pra matched seu gasto calórico.`;
+          }
+          return { msg: tip, btns: [{ text: 'Boa dica! 💡', action: 'chat_continue_2' }] };
+        },
+        // Step 3: Sleep / diet / habit check
+        () => {
+          let tip = '';
+          if (sleep === 'Ruim') {
+            tip = '😴 Seu sono está <strong>ruim</strong>. Sabia que noites mal dormidas aumentam o cortisol e dificultam a perda de peso? Vou incluir alimentos que ajudam no relaxamento (banana, aveia, chás).';
+          } else if (sleep === 'Médio') {
+            tip = '😴 Seu sono é <strong>médio</strong>. Que tal incluir um chá calmante à noite? Vou sugerir opções no plano.';
+          } else {
+            tip = '😴 Sono <strong>bom</strong> é a base! Seu plano vai potencializar essa rotina saudável.';
+          }
+          return { msg: tip, btns: [{ text: 'Ótimo! 🌟', action: 'chat_continue_3' }] };
+        },
+        // Step 4: Diet + cooking + water summary
+        () => ({
+          msg: `🥗 <strong>Resumo das suas preferências:</strong><br><br>
+          • Dieta: <strong>${dietPref || 'Equilibrada'}</strong><br>
+          • Cozinha: <strong>${cookingStyle || 'Sim'}</strong><br>
+          • Água: <strong>${waterIntake || '—'}</strong><br>
+          ${favFoods ? `• Ama: <strong>${favFoods}</strong>` : ''}<br><br>
+          ${waterIntake === 'Menos de 1L' ? '💧 Dica: tente aumentar para pelo menos 2L de água por dia. Seu metabolismo agradece!' : '💧 Hidratação em dia! Isso faz diferença nos resultados.'}`,
+          btns: [{ text: 'Perfeito! ✅', action: 'chat_continue_4' }]
+        }),
+        // Step 5: Final
+        () => ({
+          msg: `✨ <strong>Tudo pronto!</strong> Com base em todas as suas respostas, vou gerar agora um plano alimentar <strong>100% personalizado</strong> para você.<br><br>Pode levar alguns segundos...`,
+          btns: [{ text: '🎯 Gerar meu plano!', action: 'chat_finalizar' }]
+        })
+      ];
+
+      if (action === 'chat_finalizar') {
+        STATE.chatPremiumStep = 0;
+        return { screen: 'analise_loading', message: '', components: [], actions: [] };
+      }
+
+      if (step >= CHAT_TOTAL) {
+        STATE.chatPremiumStep = CHAT_TOTAL - 1;
+      }
+
+      const current = steps[step]();
+      STATE.chatPremiumStep = Math.min(step + 1, CHAT_TOTAL);
+
+      return {
+        screen: 'chat_premium',
+        message: current.msg,
+        components: [
+          { type: 'buttons', items: current.btns.map(b => ({ ...b, variant: 'primary' })) }
+        ],
+        actions: current.btns.map(b => ({ id: b.action.replace('chat_continue_', ''), next: 'chat_premium' }))
+      };
+    }
+
+    // ============================
     case 'analise': {
       // Usa diagnostico do backend se disponível, senão gera local
       const diag = STATE.plano && STATE.plano.diagnostico
@@ -198,6 +351,9 @@ function engine(action, payload) {
       STATE.lastDiagnostico = diag.resumo && diag.resumo.length > 0
         ? diag.resumo.join(' · ') : STATE.profile.goal || '';
       STATE.lastPlano = true;
+      const btnEstrategias = isPremium()
+        ? [{ type: 'button', text: '💡 Ver estratégias', action: 'ver_estrategias', variant: 'outline' }]
+        : [];
       return {
         screen: 'analise',
         message: 'Analisei seus dados e identifiquei pontos importantes...',
@@ -206,11 +362,11 @@ function engine(action, payload) {
           { type: 'bullet_list', title: '⚠️ Pontos de atenção', items: diag.atencao },
           { type: 'bullet_list', title: '✅ Oportunidades', items: diag.oportunidades },
           { type: 'button', text: '🥗 Ver meu plano alimentar', action: 'ver_plano', variant: 'primary' },
-          { type: 'button', text: '💡 Ver estratégias', action: 'ver_estrategias', variant: 'outline' }
+          ...btnEstrategias
         ],
         actions: [
           { id: 'ver_plano', next: 'plano' },
-          { id: 'ver_estrategias', next: 'estrategias' }
+          ...(isPremium() ? [{ id: 'ver_estrategias', next: 'estrategias' }] : [])
         ]
       };
     }
@@ -218,31 +374,37 @@ function engine(action, payload) {
     // ============================
     case 'plano': {
       const meals = gerarRefeicoes(STATE.profile);
+      const premiumBtns = isPremium() ? [
+        { text: '🔄 Ver substituições', action: 'ver_subs', variant: 'secondary' },
+        { text: '🛒 Gerar lista de compras', action: 'ver_lista', variant: 'secondary' },
+        { text: '📊 Gráficos nutricionais', action: 'ver_graficos', variant: 'secondary' },
+        { text: '💡 Estratégias', action: 'ver_estrategias', variant: 'outline' },
+        { text: '💊 Suplementação', action: 'ver_suplementacao', variant: 'outline' }
+      ] : [
+        { text: '⬅️ Voltar ao menu', action: 'voltar_menu', variant: 'outline' }
+      ];
       return {
         screen: 'plano',
         message: 'Aqui está seu <strong>plano alimentar personalizado</strong>:',
         components: [
           { type: 'meal_plan', meals },
-          { type: 'buttons', items: [
-            { text: '🔄 Ver substituições', action: 'ver_subs', variant: 'secondary' },
-            { text: '🛒 Gerar lista de compras', action: 'ver_lista', variant: 'secondary' },
-            { text: '📊 Gráficos nutricionais', action: 'ver_graficos', variant: 'secondary' },
-            { text: '💡 Estratégias', action: 'ver_estrategias', variant: 'outline' },
-            { text: '💊 Suplementação', action: 'ver_suplementacao', variant: 'outline' }
-          ]}
+          { type: 'buttons', items: premiumBtns }
         ],
-        actions: [
+        actions: isPremium() ? [
           { id: 'ver_subs', next: 'substituicoes' },
           { id: 'ver_lista', next: 'lista_compras' },
           { id: 'ver_graficos', next: 'nutrition_charts' },
           { id: 'ver_estrategias', next: 'estrategias' },
           { id: 'ver_suplementacao', next: 'suplementacao' }
+        ] : [
+          { id: 'voltar_menu', next: 'onboarding' }
         ]
       };
     }
 
     // ============================
     case 'nutrition_charts': {
+      if (!isPremium()) return { screen: 'premium_block' };
       const nd = gerarDadosNutricionais(STATE.profile);
       return {
         screen: 'nutrition_charts',
@@ -257,6 +419,7 @@ function engine(action, payload) {
 
     // ============================
     case 'substituicoes': {
+      if (!isPremium()) return { screen: 'premium_block' };
       const subs = gerarSubstituicoes();
       return {
         screen: 'substituicoes',
@@ -271,6 +434,7 @@ function engine(action, payload) {
 
     // ============================
     case 'lista_compras': {
+      if (!isPremium()) return { screen: 'premium_block' };
       const list = gerarListaCompras();
       return {
         screen: 'lista_compras',
@@ -285,6 +449,7 @@ function engine(action, payload) {
 
     // ============================
     case 'estrategias': {
+      if (!isPremium()) return { screen: 'premium_block' };
       const tips = gerarDicas(STATE.profile);
       return {
         screen: 'estrategias',
@@ -307,6 +472,7 @@ function engine(action, payload) {
 
     // ============================
     case 'suplementacao': {
+      if (!isPremium()) return { screen: 'premium_block' };
       const sups = gerarSuplementos(STATE.profile);
       if (sups.length === 0) {
         return {
@@ -343,7 +509,8 @@ function engine(action, payload) {
     }
 
     // ============================
-    case 'acompanhamento':
+    case 'acompanhamento': {
+      if (!isPremium()) return { screen: 'premium_block' };
       return {
         screen: 'acompanhamento',
         message: '📊 <strong>Seu progresso depende de ajustes contínuos.</strong> Estou aqui para ajudar!',
@@ -362,6 +529,7 @@ function engine(action, payload) {
           { id: 'ver_planos', next: 'planos' }
         ]
       };
+    }
 
     // ============================
     case 'reiniciar':
@@ -414,6 +582,9 @@ function engine(action, payload) {
       };
     }
 
+    case 'assinar_premium':
+      return { screen: 'assinar_premium', message: '', components: [], actions: [] };
+
     default:
       return engine(null, null);
   }
@@ -421,6 +592,9 @@ function engine(action, payload) {
 
 // ---- Anamnese Helpers ----
 function transitionToAnalise() {
+  if (isPremium()) {
+    return showAnamneseExtraQuestion(0);
+  }
   return { screen: 'analise_loading', message: '', components: [], actions: [] };
 }
 
@@ -432,16 +606,9 @@ function showAnamneseQuestion(step) {
         { text: 'Saúde / metabolismo', action: 'ans_goal_health' },
         { text: 'Bem-estar geral', action: 'ans_goal_wellness' }
     ]},
-    { msg: `Como é sua <strong>rotina</strong>? (horários, trabalho, sono)`, type: 'text', key: 'routine', placeholder: 'Descreva sua rotina...' },
-    { msg: `Como está sua <strong>alimentação</strong> hoje?`, type: 'text', key: 'diet', placeholder: 'O que você costuma comer?' },
     { msg: `Possui <strong>restrições alimentares</strong>?`, type: 'options', key: 'restrictions', items: [
         { text: 'Não', action: 'ans_restr_no' },
         { text: 'Sim', action: 'ans_restr_yes' }
-    ]},
-    { msg: `Como está seu <strong>sono</strong>?`, type: 'options', key: 'sleep', items: [
-        { text: 'Bom', action: 'ans_sleep_good' },
-        { text: 'Médio', action: 'ans_sleep_mid' },
-        { text: 'Ruim', action: 'ans_sleep_bad' }
     ]},
     { msg: `Nível de <strong>atividade física</strong>?`, type: 'options', key: 'activity', items: [
         { text: 'Sedentário', action: 'ans_act_sed' },
@@ -449,15 +616,10 @@ function showAnamneseQuestion(step) {
         { text: 'Moderado', action: 'ans_act_mod' },
         { text: 'Intenso', action: 'ans_act_int' }
     ]},
-    { msg: `Possui <strong>exames recentes</strong>?`, type: 'options', key: 'exams', items: [
-        { text: 'Sim, tenho exames', action: 'ans_exams_yes' },
-        { text: 'Não, não tenho', action: 'ans_exams_no' }
-    ]},
     { msg: `Qual seu <strong>sexo</strong>?`, type: 'options', key: 'gender', items: [
         { text: 'Masculino', action: 'ans_gender_m' },
         { text: 'Feminino', action: 'ans_gender_f' }
     ]},
-    { msg: `Qual sua <strong>idade</strong>?`, type: 'text', key: 'age', placeholder: 'Ex: 30' },
     { msg: `Qual seu <strong>peso</strong>? (kg)`, type: 'text', key: 'weight', placeholder: 'Ex: 70' },
     { msg: `Qual sua <strong>altura</strong>? (cm)`, type: 'text', key: 'height', placeholder: 'Ex: 170' }
   ];
@@ -509,6 +671,103 @@ function handleAnamneseAnswer(action, payload) {
     const key = action.replace('ans_text_', '');
     STATE.profile[key] = payload || '';
   }
+}
+
+function showAnamneseExtraQuestion(step) {
+  const extraQuestions = [
+    {
+      msg: `Qual <strong>tipo de dieta</strong> você prefere?`,
+      type: 'options', items: [
+        { text: 'Low carb', action: 'ans_extra_diet_lowcarb' },
+        { text: 'Mediterrânea', action: 'ans_extra_diet_med' },
+        { text: 'Equilibrada', action: 'ans_extra_diet_balanced' },
+        { text: 'Tanto faz', action: 'ans_extra_diet_any' }
+      ]
+    },
+    {
+      msg: `Você <strong>cozinha</strong> ou prefere opções prontas?`,
+      type: 'options', items: [
+        { text: 'Sim, cozinho', action: 'ans_extra_cook_yes' },
+        { text: 'Não cozinho', action: 'ans_extra_cook_no' },
+        { text: 'Às vezes', action: 'ans_extra_cook_sometimes' }
+      ]
+    },
+    {
+      msg: `Prefere refeições <strong>rápidas ou elaboradas</strong>?`,
+      type: 'options', items: [
+        { text: 'Rápidas', action: 'ans_extra_meal_fast' },
+        { text: 'Elaboradas', action: 'ans_extra_meal_elaborate' },
+        { text: 'Ambos', action: 'ans_extra_meal_both' }
+      ]
+    },
+    {
+      msg: `Tem <strong>problemas digestivos</strong>? (gases, azia, intestino preso)`,
+      type: 'options', items: [
+        { text: 'Sim', action: 'ans_extra_digest_yes' },
+        { text: 'Não', action: 'ans_extra_digest_no' }
+      ]
+    },
+    {
+      msg: `Qual sua <strong>ingestão de água</strong> diária?`,
+      type: 'options', items: [
+        { text: 'Menos de 1L', action: 'ans_extra_water_less' },
+        { text: '1 a 2L', action: 'ans_extra_water_mid' },
+        { text: 'Mais de 2L', action: 'ans_extra_water_more' }
+      ]
+    },
+    {
+      msg: `Tem algum <strong>alimento que ama</strong> e gostaria de incluir no plano?`,
+      type: 'text', placeholder: 'Ex: chocolate, pizza, açaí...'
+    },
+    {
+      msg: `Como está seu <strong>sono</strong>?`,
+      type: 'options', items: [
+        { text: 'Bom', action: 'ans_extra_sleep_good' },
+        { text: 'Médio', action: 'ans_extra_sleep_mid' },
+        { text: 'Ruim', action: 'ans_extra_sleep_bad' }
+      ]
+    },
+    {
+      msg: `Possui <strong>exames recentes</strong>?`,
+      type: 'options', items: [
+        { text: 'Sim', action: 'ans_extra_exams_yes' },
+        { text: 'Não', action: 'ans_extra_exams_no' }
+      ]
+    }
+  ];
+
+  const q = extraQuestions[step];
+  if (!q) return showFirstChatPremiumStep();
+
+  if (q.type === 'options') {
+    return {
+      screen: 'anamnese_extra',
+      message: q.msg,
+      components: [
+        { type: 'options', items: q.items, layout: 'grid' }
+      ],
+      actions: q.items.map(i => ({ id: i.action.replace('ans_extra_', ''), next: 'anamnese_extra' }))
+    };
+  }
+
+  return {
+    screen: 'anamnese_extra',
+    message: q.msg,
+    components: [
+      { type: 'text_input', placeholder: q.placeholder || 'Digite aqui...', action: 'ans_extra_text' }
+    ],
+    actions: [{ id: 'ans_extra_text', next: 'anamnese_extra' }]
+  };
+}
+
+function showFirstChatPremiumStep() {
+  STATE.chatPremiumStep = 1;
+  return {
+    screen: 'chat_premium',
+    message: '👋 <strong>Ótimo!</strong> Agora vou te fazer algumas perguntas rápidas para<br>deixar seu plano ainda mais personalizado.',
+    components: [{ type: 'buttons', items: [{ text: 'Continuar 👍', action: 'chat_continue_0', variant: 'primary' }] }],
+    actions: [{ id: '0', next: 'chat_premium' }]
+  };
 }
 
 // ---- Diagnóstico ----
@@ -841,8 +1100,8 @@ function gerarDicas(p) {
 function calcularTMB(p) {
   const peso = parseFloat(p.weight);
   const altura = parseFloat(p.height);
-  const idade = parseInt(p.age, 10);
-  if (!peso || !altura || !idade || !p.gender || isNaN(peso) || isNaN(altura) || isNaN(idade)) return null;
+  const idade = parseInt(p.age, 10) || 30; // default 30 se não informado
+  if (!peso || !altura || !p.gender || isNaN(peso) || isNaN(altura)) return null;
   if (p.gender === 'Masculino') {
     return Math.round(10 * peso + 6.25 * altura - 5 * idade + 5);
   } else {
@@ -969,7 +1228,8 @@ const API_URL = window.location.protocol === 'file:'
   ? 'http://localhost:3001/api'
   : `${window.location.protocol}//${window.location.hostname}:3001/api`;
 
-const ANAMNESE_TOTAL_STEPS = 11; // Total de perguntas da anamnese
+const ANAMNESE_TOTAL_STEPS = 6; // Perguntas básicas (gratuitas)
+const ANAMNESE_EXTRA_TOTAL = 8; // Perguntas extras (premium)
 
 // ---- Sanitização HTML ----
 function escapeHtml(str) {
@@ -1073,7 +1333,7 @@ function renderProgresso() {
       ${progresso.length < 2
         ? `<div class="historico-empty" style="margin-top:40px;">
             <p style="font-size:1.1rem;margin-bottom:8px;">Precisa de pelo menos 2 registros</p>
-            <p style="color:var(--gray-500);">Complete consultas com seu peso para ver gr&aacute;fico de evolu&ccedil;&atilde;o.</p>
+            <p style="color:var(--text-tertiary);">Complete consultas com seu peso para ver gr&aacute;fico de evolu&ccedil;&atilde;o.</p>
           </div>`
         : `<div class="chart-card" style="height:300px;">
             <canvas id="chart-progresso"></canvas>
@@ -1084,7 +1344,7 @@ function renderProgresso() {
               <div class="progresso-row">
                 <span>${new Date(p.data).toLocaleDateString('pt-BR')}</span>
                 <span><strong>${p.peso} kg</strong></span>
-                <span style="color:var(--gray-500);font-size:0.85rem;">${p.objetivo ? escapeHtml(p.objetivo) : ''}</span>
+                <span style="color:var(--text-tertiary);font-size:0.85rem;">${p.objetivo ? escapeHtml(p.objetivo) : ''}</span>
               </div>
             `).join('')}
           </div>`
@@ -1152,11 +1412,11 @@ function initProgressChart(progresso) {
       datasets: [{
         label: 'Peso (kg)',
         data: pesos,
-        borderColor: '#52B788',
-        backgroundColor: 'rgba(82, 183, 136, 0.1)',
+        borderColor: '#00D68F',
+        backgroundColor: 'rgba(0, 214, 143, 0.1)',
         fill: true,
         tension: 0.3,
-        pointBackgroundColor: '#2D6A4F',
+        pointBackgroundColor: '#00B975',
         pointRadius: 4,
         pointHoverRadius: 6,
         borderWidth: 2.5,
@@ -1210,13 +1470,16 @@ const ACTION_ROUTES = {
   'gerar_analise': 'analise',
   'reiniciar': 'reiniciar',
   'agendar': 'agendar',
-  'duvidas': 'duvidas'
+  'duvidas': 'duvidas',
+  'assinar_premium': 'assinar_premium'
 };
 
 // ---- State Reset ----
 function resetState() {
   STATE.screen = 'onboarding';
   STATE.anamneseStep = 0;
+  STATE.anamneseExtraStep = 0;
+  STATE.chatPremiumStep = 0;
   STATE.plano = null;
   Object.assign(STATE.profile, {
     name: '', goal: '', routine: '', diet: '',
@@ -1246,7 +1509,7 @@ async function sendToBackend(profile) {
     height: profile.height
   });
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 1500);
+  const timeout = setTimeout(() => controller.abort(), 5000);
   try {
     const res = await fetch(`${API_URL}/consulta`, {
       method: 'POST',
@@ -1266,6 +1529,196 @@ async function sendToBackend(profile) {
   }
 }
 
+// ---- Premium / Stripe ----
+function getPremiumEmail() {
+  return localStorage.getItem('nutricare_premium_email') || '';
+}
+
+async function iniciarCheckoutPremium() {
+  const container = document.getElementById('screen-container');
+  container.innerHTML = `
+    <div class="screen" style="display:flex;align-items:center;justify-content:center;background:var(--bg-deep);">
+      <div style="text-align:center;padding:40px;">
+        <div style="animation:spin 1.2s linear infinite;margin-bottom:20px;width:40px;height:40px;border:3px solid rgba(0,214,143,0.15);border-top-color:var(--accent-500);border-radius:50%;margin:0 auto 20px;"></div>
+        <p style="color:var(--text-secondary);font-size:0.9rem;">Redirecionando para pagamento...</p>
+      </div>
+    </div>`;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const res = await fetch(`${API_URL}/create-checkout-session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ planType: 'premium' }),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    const data = await res.json();
+    if (data.success && data.url) {
+      window.location.href = data.url;
+    } else if (res.status === 503) {
+      container.innerHTML = `<div class="screen" style="display:flex;align-items:center;justify-content:center;padding:40px;background:var(--bg-deep);">
+        <div style="text-align:center;max-width:360px;">
+          <p style="font-size:3rem;margin-bottom:12px;">⏳</p>
+          <h2 style="font-size:1.3rem;margin-bottom:8px;">Pagamento temporariamente indisponível</h2>
+          <p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:20px;">O sistema de pagamento está sendo configurado. Tente novamente mais tarde.</p>
+          <button class="btn-primary" onclick="dispatch('ver_planos')">Voltar</button>
+        </div>
+      </div>`;
+    } else {
+      container.innerHTML = `<div class="screen" style="display:flex;align-items:center;justify-content:center;padding:40px;background:var(--bg-deep);">
+        <div style="text-align:center;max-width:360px;">
+          <p style="font-size:2rem;margin-bottom:12px;">❌</p>
+          <p style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:4px;">Erro ao iniciar pagamento.</p>
+          <p style="color:var(--text-tertiary);font-size:0.8rem;margin-bottom:20px;">${data.error || 'Tente novamente.'}</p>
+          <button class="btn-secondary" style="margin-top:10px;" onclick="dispatch('voltar_planos')">Voltar</button>
+        </div>
+      </div>`;
+    }
+  } catch (err) {
+    console.error('❌ Erro checkout:', err);
+    const msg = err.name === 'AbortError'
+      ? 'Tempo limite excedido. Verifique se o servidor está rodando.'
+      : 'Servidor offline. Verifique se a API está rodando.';
+    container.innerHTML = `<div class="screen" style="display:flex;align-items:center;justify-content:center;padding:40px;background:var(--bg-deep);">
+      <div style="text-align:center;max-width:360px;">
+        <p style="font-size:2rem;margin-bottom:12px;">❌</p>
+        <p style="color:var(--text-secondary);font-size:0.9rem;">${msg}</p>
+        <p style="color:var(--text-tertiary);font-size:0.75rem;margin:8px 0;">Dica: execute <strong>iniciar.bat</strong> para rodar o servidor</p>
+        <button class="btn-secondary" style="margin-top:16px;" onclick="dispatch('voltar_planos')">Voltar</button>
+      </div>
+    </div>`;
+  }
+}
+
+async function verificarPremiumSucesso(sessionId) {
+  try {
+    const res = await fetch(`${API_URL}/verify-payment?session_id=${encodeURIComponent(sessionId)}`);
+    const data = await res.json();
+    if (data.success && data.paid) {
+      localStorage.setItem('nutricare_premium', 'true');
+      localStorage.setItem('nutricare_premium_email', data.customer_email || '');
+      localStorage.setItem('nutricare_premium_date', new Date().toISOString());
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.error('❌ Erro ao verificar pagamento:', err);
+    return false;
+  }
+}
+
+function renderPremiumAtivado(email) {
+  const container = document.getElementById('screen-container');
+  container.innerHTML = `
+    <div class="screen" style="display:flex;align-items:center;justify-content:center;padding:40px;background:var(--bg-deep);">
+      <div style="text-align:center;max-width:360px;animation:slideUp 0.5s ease;">
+        <div style="font-size:4rem;margin-bottom:16px;animation:pulse 2s ease-in-out infinite;">🎉</div>
+        <h1 style="font-size:1.6rem;margin-bottom:8px;">Premium Ativado!</h1>
+        <p style="color:var(--text-secondary);font-size:0.9rem;line-height:1.7;margin-bottom:20px;">
+          Agora você tem acesso a todos os recursos premium do NutriCare.
+          ${email ? `<br><span style="color:var(--text-tertiary);font-size:0.8rem;">Confirmação enviada para ${email}</span>` : ''}
+        </p>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <button class="btn-primary" onclick="dispatch('iniciar_consulta')">Começar Consulta</button>
+          <button class="btn-secondary" onclick="dispatch('onboarding')">Ir para o Menu</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ---- Premium Feature Gates ----
+function isPremium() {
+  return localStorage.getItem('nutricare_premium') === 'true';
+}
+
+function upgradeRedirect() {
+  const container = document.getElementById('screen-container');
+  if (!container) return;
+  container.innerHTML = `
+    <div class="screen" style="display:flex;align-items:center;justify-content:center;padding:40px;background:var(--bg-deep);">
+      <div style="text-align:center;max-width:360px;animation:slideUp 0.5s ease;">
+        <div style="font-size:4rem;margin-bottom:16px;">🔒</div>
+        <h2 style="font-size:1.3rem;margin-bottom:8px;">Funcionalidade Premium</h2>
+        <p style="color:var(--text-secondary);font-size:0.88rem;line-height:1.6;margin-bottom:24px;">
+          Esta funcionalidade é exclusiva do plano Premium.<br>
+          Assine agora e tenha acesso a todos os recursos.
+        </p>
+        <button class="btn-primary" onclick="dispatch('ver_planos')">💰 Ver planos</button>
+      </div>
+    </div>`;
+}
+
+function renderChatPremium(resp) {
+  const step = STATE.chatPremiumStep ?? 1;
+  const total = 6;
+  const progressPct = Math.min((step / total) * 100, 100);
+
+  // Get first button action for the text input to use on submit
+  const firstAction = resp.components?.[0]?.items?.[0]?.action || '';
+
+  // User message bubble (from text input)
+  let userBubbleHtml = '';
+  if (STATE.lastUserInput) {
+    userBubbleHtml = `
+      <div class="message user">
+        <div class="message-avatar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="white" stroke-width="2"/><path d="M8 14C8 14 10 12 12 14C14 12 16 14 16 14" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M10 10L10 11" stroke="white" stroke-width="2" stroke-linecap="round"/><path d="M14 10L14 11" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
+        </div>
+        <div class="message-bubble" style="color:white;border-bottom-right-radius:4px;max-width:85%;margin-left:auto;"><p>${escapeHtml(STATE.lastUserInput)}</p></div>
+      </div>`;
+    STATE.lastUserInput = null;
+  }
+
+  return `
+    <div class="screen">
+      <header class="consult-header" style="background:var(--bg-card);border-bottom:1px solid var(--border-color);">
+        <div class="header-top">
+          <div class="header-brand">
+            <button class="header-back" onclick="dispatch('voltar_menu')" aria-label="Voltar">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M12 16L6 10L12 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            </button>
+            <svg width="24" height="24" viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="22" stroke="var(--accent-500)" stroke-width="3"/><path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/><path d="M18 20L18 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/><path d="M30 20L30 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/></svg>
+            <span>Bot Nutricionista</span>
+          </div>
+          <span style="font-size:0.75rem;color:var(--text-secondary);background:var(--accent-500);color:#fff;padding:2px 10px;border-radius:10px;">⭐ Premium</span>
+        </div>
+        <div class="progress-bar-track" style="margin-top:8px;">
+          <div class="progress-bar-fill" style="width:${progressPct}%;background:var(--accent-500);"></div>
+        </div>
+      </header>
+      <main class="chat-container" id="chat-inner" style="padding-bottom:120px;">
+        ${userBubbleHtml}
+        <div class="message bot">
+          <div class="message-avatar">
+            <svg width="18" height="18" viewBox="0 0 48 48" fill="none">
+              <circle cx="24" cy="24" r="22" stroke="var(--accent-500)" stroke-width="3"/>
+              <path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/>
+              <path d="M18 20L18 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/>
+              <path d="M30 20L30 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="message-bubble">${resp.message}</div>
+        </div>
+      </main>
+      <div style="position:fixed;bottom:0;left:0;right:0;padding:12px 16px 24px;background:var(--bg-deep);border-top:1px solid var(--border-color);display:flex;flex-direction:column;gap:8px;">
+        <div style="display:flex;gap:8px;width:100%;">
+          <input id="dynamic-text-input" type="text" placeholder="Digite sua resposta..."
+            style="flex:1;padding:12px 16px;border-radius:12px;border:1px solid var(--border-color);background:var(--bg-surface);color:var(--text-primary);font-size:0.9rem;outline:none;" />
+          <button id="dynamic-send-btn" class="btn-primary" data-action="${firstAction}" style="padding:12px 20px;white-space:nowrap;" disabled>
+            Enviar
+          </button>
+        </div>
+        ${resp.components.map(c => {
+          if (c.type === 'buttons') {
+            return c.items.map(b => `<button class="btn-primary" data-action="${b.action}" style="width:100%;">${b.text}</button>`).join('');
+          }
+          return '';
+        }).join('')}
+      </div>
+    </div>`;
+}
+
 function dispatch(action, payload) {
   console.log(`🔄 [NutriCare] Action: ${action}`, payload ? `Payload: ${payload.slice(0, 50)}...` : '');
 
@@ -1275,11 +1728,29 @@ function dispatch(action, payload) {
     console.log(`   → Tela: ${STATE.screen}`);
   }
 
+  // Reseta estado ao iniciar nova consulta (evita pular perguntas na 2ª vez)
+  if (action === 'iniciar_consulta') {
+    STATE.anamneseStep = 0;
+    STATE.anamneseExtraStep = 0;
+    STATE.chatPremiumStep = 0;
+    STATE.plano = null;
+    Object.assign(STATE.profile, {
+      name: '', goal: '', routine: '', diet: '',
+      restrictions: [], restrictionDetail: '',
+      hasExams: false, sleep: '', activity: '',
+      age: '', weight: '', height: '', gender: '',
+      medications: '', difficulties: [], emotionalEating: '',
+      motivation: 3, extraInfo: ''
+    });
+  }
+
   // Save user text input for bubble display
   if (typeof payload === 'string' && payload.trim()) {
     STATE.lastUserInput = payload.trim();
   }
   const response = engine(action, payload);
+  // Atualiza STATE.screen com a tela retornada pelo engine (essencial para transições internas)
+  STATE.screen = response.screen;
   render(response);
 }
 
@@ -1290,7 +1761,7 @@ function renderUserBubble() {
       <div class="message-avatar" style="margin-left: auto;">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="white" stroke-width="2"/><path d="M8 14C8 14 10 12 12 14C14 12 16 14 16 14" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M10 10L10 11" stroke="white" stroke-width="2" stroke-linecap="round"/><path d="M14 10L14 11" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
       </div>
-      <div class="message-bubble" style="background:var(--green-800);color:white;border-bottom-right-radius:4px;max-width:85%;margin-left:auto;"><p>${escapeHtml(STATE.lastUserInput)}</p></div>
+      <div class="message-bubble" style="color:white;border-bottom-right-radius:4px;max-width:85%;margin-left:auto;"><p>${escapeHtml(STATE.lastUserInput)}</p></div>
     </div>`;
   STATE.lastUserInput = null;
   return html;
@@ -1329,8 +1800,12 @@ function render(response) {
       bindClicks(container);
       return;
     case 'contato':
+      if (!isPremium()) { upgradeRedirect(); return; }
       container.innerHTML = renderContato(response);
       bindClicks(container);
+      return;
+    case 'assinar_premium':
+      iniciarCheckoutPremium();
       return;
     case 'analise_loading':
       container.innerHTML = renderAnaliseLoader();
@@ -1348,7 +1823,7 @@ function render(response) {
           if (saudavel) {
             result = await Promise.race([
               sendToBackend(STATE.profile),
-              new Promise(r => setTimeout(() => r(null), 1500))
+              new Promise(r => setTimeout(() => r(null), 5000))
             ]);
           } else {
             console.log('💻 [NutriCare] Servidor offline, gerando localmente');
@@ -1368,11 +1843,24 @@ function render(response) {
         dispatch('gerar_analise', null);
       }, 100);
       return;
+    case 'premium_block':
+      upgradeRedirect();
+      return;
+    case 'anamnese_extra':
+      container.innerHTML = renderChatScreen(response);
+      bindClicks(container);
+      bindDynamicInteractions(container, response);
+      return;
+    case 'chat_premium':
+      container.innerHTML = renderChatPremium(response);
+      bindClicks(container);
+      return;
     case 'analise':
       container.innerHTML = renderAnalise(response);
       bindClicks(container);
       return;
     case 'nutrition_charts':
+      if (!isPremium()) { upgradeRedirect(); return; }
       container.innerHTML = renderNutritionCharts(response);
       bindClicks(container);
       initCharts();
@@ -1383,6 +1871,7 @@ function render(response) {
       bindClicks(container);
       return;
     case 'progresso':
+      if (!isPremium()) { upgradeRedirect(); return; }
       renderProgresso();
       bindClicks(container);
       return;
@@ -1403,6 +1892,7 @@ function render(response) {
 
 function renderChatScreen(resp) {
   const hasProgress = resp.screen === 'anamnese_step';
+  const hasExtraProgress = resp.screen === 'anamnese_extra';
   const progressHtml = hasProgress ? `
     <header class="consult-header">
       <div class="header-top">
@@ -1410,7 +1900,7 @@ function renderChatScreen(resp) {
           <button class="header-back" onclick="dispatch('voltar_menu')">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M12 16L6 10L12 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           </button>
-          <svg width="24" height="24" viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="22" stroke="#2D6A4F" stroke-width="3"/><path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="#2D6A4F" stroke-width="2.5" stroke-linecap="round"/><path d="M18 20L18 22" stroke="#2D6A4F" stroke-width="2.5" stroke-linecap="round"/><path d="M30 20L30 22" stroke="#2D6A4F" stroke-width="2.5" stroke-linecap="round"/></svg>
+          <svg width="24" height="24" viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="22" stroke="#00D68F" stroke-width="3"/><path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="#00D68F" stroke-width="2.5" stroke-linecap="round"/><path d="M18 20L18 22" stroke="#00D68F" stroke-width="2.5" stroke-linecap="round"/><path d="M30 20L30 22" stroke="#00D68F" stroke-width="2.5" stroke-linecap="round"/></svg>
           <span>NutriCare</span>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
@@ -1420,6 +1910,24 @@ function renderChatScreen(resp) {
       </div>
       <div class="progress-bar-track">
         <div class="progress-bar-fill" style="width:${Math.min((STATE.anamneseStep / ANAMNESE_TOTAL_STEPS) * 100, 100)}%"></div>
+      </div>
+    </header>` : hasExtraProgress ? `
+    <header class="consult-header">
+      <div class="header-top">
+        <div class="header-brand">
+          <button class="header-back" onclick="dispatch('voltar_menu')">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M12 16L6 10L12 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </button>
+          <svg width="24" height="24" viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="22" stroke="#00D68F" stroke-width="3"/><path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="#00D68F" stroke-width="2.5" stroke-linecap="round"/><path d="M18 20L18 22" stroke="#00D68F" stroke-width="2.5" stroke-linecap="round"/><path d="M30 20L30 22" stroke="#00D68F" stroke-width="2.5" stroke-linecap="round"/></svg>
+          <span>Premium</span>
+          <span style="font-size:0.7rem;background:var(--accent-500);color:#fff;padding:2px 8px;border-radius:8px;margin-left:4px;">⭐</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:0.75rem;color:var(--text-secondary);">${STATE.anamneseExtraStep + 1}/${ANAMNESE_EXTRA_TOTAL}</span>
+        </div>
+      </div>
+      <div class="progress-bar-track">
+        <div class="progress-bar-fill" style="width:${((STATE.anamneseExtraStep) / ANAMNESE_EXTRA_TOTAL) * 100}%"></div>
       </div>
     </header>` : '';
 
@@ -1443,10 +1951,10 @@ function renderChatScreen(resp) {
       <div class="message bot">
         <div class="message-avatar">
           <svg width="18" height="18" viewBox="0 0 48 48" fill="none">
-            <circle cx="24" cy="24" r="22" stroke="#2D6A4F" stroke-width="3"/>
-            <path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="#2D6A4F" stroke-width="2.5" stroke-linecap="round"/>
-            <path d="M18 20L18 22" stroke="#2D6A4F" stroke-width="2.5" stroke-linecap="round"/>
-            <path d="M30 20L30 22" stroke="#2D6A4F" stroke-width="2.5" stroke-linecap="round"/>
+            <circle cx="24" cy="24" r="22" stroke="var(--accent-500)" stroke-width="3"/>
+            <path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/>
+            <path d="M18 20L18 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/>
+            <path d="M30 20L30 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/>
           </svg>
         </div>
         <div class="message-bubble">${resp.message}</div>
@@ -1505,7 +2013,7 @@ function renderComponent(comp, screen) {
           <ul class="plan-features">
             ${p.features.map(f => `<li class="${f.included ? '' : 'plan-no'}">${f.included ? '✔' : '✘'} ${f.text}</li>`).join('')}
           </ul>
-          <button class="btn-primary" data-action="${p.action}">${p.recommended ? 'Falar com nutricionista' : 'Começar grátis'}</button>
+          <button class="btn-primary" data-action="${p.action}">${p.recommended ? 'Assinar Premium' : 'Começar grátis'}</button>
         </div>`).join('')}</div>`;
 
     case 'contact_card':
@@ -1534,7 +2042,7 @@ function renderComponent(comp, screen) {
       return `
         <div class="file-upload-wrapper" style="padding:8px 0;">
           <div class="file-upload-area" id="dynamic-file-area" style="cursor:pointer;">
-            <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><path d="M16 22V10M16 10L11 15M16 10L21 15" stroke="#2D6A4F" stroke-width="2" stroke-linecap="round"/><path d="M4 20V24C4 26.2 5.8 28 8 28H24C26.2 28 28 26.2 28 24V20" stroke="#2D6A4F" stroke-width="2" stroke-linecap="round"/></svg>
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><path d="M16 22V10M16 10L11 15M16 10L21 15" stroke="var(--accent-500)" stroke-width="2" stroke-linecap="round"/><path d="M4 20V24C4 26.2 5.8 28 8 28H24C26.2 28 28 26.2 28 24V20" stroke="var(--accent-500)" stroke-width="2" stroke-linecap="round"/></svg>
             <p>Clique para enviar exames <span>(opcional)</span></p>
             <input type="file" accept="image/*,application/pdf" id="dynamic-file-input" hidden>
           </div>
@@ -1551,7 +2059,7 @@ function renderComponent(comp, screen) {
     case 'bullet_list':
       return `
         <div class="result-section" style="margin-bottom:16px;">
-          <h3 style="font-size:1rem;color:var(--green-800);margin-bottom:12px;">${comp.title}</h3>
+          <h3 style="font-size:1rem;color:var(--accent-500);margin-bottom:12px;">${comp.title}</h3>
           <div class="result-card">
             <ul>${comp.items.map(i => `<li>${i}</li>`).join('')}</ul>
           </div>
@@ -1596,31 +2104,31 @@ function renderComponent(comp, screen) {
               <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M12 16L6 10L12 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             </button>
             <div style="display:flex;align-items:center;gap:12px;">
-              <div style="width:40px;height:40px;border-radius:50%;background:var(--green-100);display:flex;align-items:center;justify-content:center;font-size:1.3rem;">${m.icon}</div>
+              <div style="width:40px;height:40px;border-radius:50%;background:var(--accent-glow);display:flex;align-items:center;justify-content:center;font-size:1.3rem;">${m.icon}</div>
               <div>
                 <h2 style="margin:0;font-size:1.2rem;">${m.name}</h2>
-                <span style="font-size:0.85rem;color:var(--gray-400);">${m.time}</span>
+                <span style="font-size:0.85rem;color:var(--text-tertiary);">${m.time}</span>
               </div>
             </div>
             <div style="width:20px;"></div>
           </header>
 
           <div class="meal-detail-opcoes">
-            <h3 style="font-size:1rem;color:var(--green-800);margin-bottom:12px;">🍽️ Opções</h3>
+            <h3 style="font-size:1rem;color:var(--accent-500);margin-bottom:12px;">🍽️ Opções</h3>
             ${m.main.split('\n').map(op => `<div class="result-card" style="margin-bottom:8px;padding:12px 16px;">${op}</div>`).join('')}
           </div>
 
           ${m.subs ? `
             <div class="meal-detail-subs" style="margin-top:16px;">
-              <h3 style="font-size:1rem;color:var(--green-800);margin-bottom:8px;">🔄 Substituições</h3>
-              <div class="meal-substitutions" style="padding:12px 16px;background:var(--green-50);border-radius:var(--radius-sm);">
+              <h3 style="font-size:1rem;color:var(--accent-500);margin-bottom:8px;">🔄 Substituições</h3>
+              <div class="meal-substitutions" style="padding:12px 16px;background:var(--accent-glow);border-radius:var(--radius-sm);">
                 <div class="meal-substitutions-text">${m.subs}</div>
               </div>
             </div>` : ''}
 
           ${comp.receitas ? `
             <div class="meal-detail-receitas" style="margin-top:16px;">
-              <h3 style="font-size:1rem;color:var(--green-800);margin-bottom:8px;">📖 Receitas sugeridas</h3>
+              <h3 style="font-size:1rem;color:var(--accent-500);margin-bottom:8px;">📖 Receitas sugeridas</h3>
               ${comp.receitas}
             </div>` : ''}
 
@@ -1735,7 +2243,7 @@ function renderPlans(resp) {
                 <ul class="plan-features">
                   ${p.features.map(f => `<li class="${f.included ? '' : 'plan-no'}">${f.included ? '✔' : '✘'} ${f.text}</li>`).join('')}
                 </ul>
-                <button class="btn-primary" data-action="${p.action}">${p.recommended ? 'Falar com nutricionista' : 'Começar grátis'}</button>
+                <button class="btn-primary" data-action="${p.action}">${p.recommended ? 'Assinar Premium' : 'Começar grátis'}</button>
               </div>`).join('')}
           </div>` : ''}
       </div>
@@ -1761,16 +2269,16 @@ function renderContato(resp) {
 function renderAnaliseLoader() {
   STATE.lastUserInput = null;
   return `
-    <div class="screen" id="screen-analise-loader" style="display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg, var(--green-800) 0%, var(--green-900) 100%);">
+    <div class="screen" id="screen-analise-loader" style="display:flex;align-items:center;justify-content:center;background:var(--bg-deep);">
       <div style="text-align:center;padding:40px;">
         <div class="loading-spinner">
           <svg width="64" height="64" viewBox="0 0 48 48" fill="none">
             <circle cx="24" cy="24" r="22" stroke="rgba(255,255,255,0.2)" stroke-width="3"/>
-            <circle cx="24" cy="24" r="22" stroke="#B7E4C7" stroke-width="3" stroke-dasharray="138" stroke-dashoffset="100" stroke-linecap="round" style="transform-origin:50% 50%;animation:spin 1.2s linear infinite;">
+            <circle cx="24" cy="24" r="22" stroke="rgba(0,214,143,0.3)" stroke-width="3" stroke-dasharray="138" stroke-dashoffset="100" stroke-linecap="round" style="transform-origin:50% 50%;animation:spin 1.2s linear infinite;">
             </circle>
-            <path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="#B7E4C7" stroke-width="2.5" stroke-linecap="round"/>
-            <path d="M18 20L18 22" stroke="#B7E4C7" stroke-width="2.5" stroke-linecap="round"/>
-            <path d="M30 20L30 22" stroke="#B7E4C7" stroke-width="2.5" stroke-linecap="round"/>
+            <path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="rgba(0,214,143,0.6)" stroke-width="2.5" stroke-linecap="round"/>
+            <path d="M18 20L18 22" stroke="rgba(0,214,143,0.6)" stroke-width="2.5" stroke-linecap="round"/>
+            <path d="M30 20L30 22" stroke="rgba(0,214,143,0.6)" stroke-width="2.5" stroke-linecap="round"/>
           </svg>
         </div>
         <h2 style="color:white;margin-top:24px;font-size:1.3rem;">Analisando seus dados...</h2>
@@ -1839,7 +2347,7 @@ function renderNutritionCharts(resp) {
           <span class="summary-label">Gorduras</span>
         </div>
         ${nd.tmb ? `
-        <div class="summary-item" style="border-left:2px solid var(--green-200);padding-left:12px;">
+        <div class="summary-item" style="border-left:2px solid var(--accent-glow);padding-left:12px;">
           <span class="summary-value" style="font-size:13px;">${nd.tmb}</span>
           <span class="summary-label">TMB (basal)</span>
         </div>` : ''}
@@ -1995,16 +2503,16 @@ function exportarPDF() {
         * { box-sizing: border-box; }
         body { font-family: 'Segoe UI', Arial, sans-serif; color: #1a1a2e; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; }
         .print-logo { text-align: center; margin-bottom: 24px; }
-        .print-logo h1 { color: #2D6A4F; font-size: 1.6rem; margin: 0; }
+        .print-logo h1 { color: #00D68F; font-size: 1.6rem; margin: 0; }
         .print-logo p { color: #666; font-size: 0.85rem; margin: 4px 0 0; }
-        .print-header { background: linear-gradient(135deg, #2D6A4F, #40916C); color: white; padding: 20px 24px; border-radius: 12px; margin-bottom: 20px; }
+        .print-header { background: linear-gradient(135deg, #00B975, #009E5E); color: white; padding: 20px 24px; border-radius: 12px; margin-bottom: 20px; }
         .print-header h2 { margin: 0 0 8px; font-size: 1.2rem; }
         .print-header p { margin: 2px 0; font-size: 0.9rem; opacity: 0.9; }
         .print-section { margin-bottom: 20px; }
-        .print-section h3 { color: #2D6A4F; border-bottom: 2px solid #D8F3DC; padding-bottom: 6px; margin-bottom: 12px; font-size: 1rem; }
+        .print-section h3 { color: #00D68F; border-bottom: 2px solid rgba(0,214,143,0.2); padding-bottom: 6px; margin-bottom: 12px; font-size: 1rem; }
         table.print-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
         table.print-table th, table.print-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
-        table.print-table th { background: #f0fdf4; font-weight: 600; color: #2D6A4F; }
+        table.print-table th { background: #f0fdf4; font-weight: 600; color: #00B975; }
         table.print-table tr:last-child td { border-bottom: none; }
         .print-icon { font-size: 1.3rem; text-align: center; width: 36px; }
         ul { margin: 0; padding-left: 20px; }
@@ -2047,7 +2555,7 @@ function exportarPDF() {
         <p>Gerado por NutriCare em ${hoje} · Consulte um nutricionista para acompanhamento profissional.</p>
       </div>
 
-      <button class="no-print" onclick="window.print()" style="display:block;margin:20px auto;padding:10px 24px;background:#2D6A4F;color:white;border:none;border-radius:8px;font-size:1rem;cursor:pointer;">
+      <button class="no-print" onclick="window.print()" style="display:block;margin:20px auto;padding:10px 24px;background:#00B975;color:white;border:none;border-radius:8px;font-size:1rem;cursor:pointer;">
         🖨️ Imprimir / Salvar PDF
       </button>
       <button class="no-print" onclick="window.close()" style="display:block;margin:10px auto;padding:8px 16px;background:#e2e8f0;color:#333;border:none;border-radius:8px;font-size:0.9rem;cursor:pointer;">
@@ -2204,7 +2712,7 @@ function bindClicks(container) {
     const action = sendBtn.dataset.action;
     textInput.addEventListener('input', () => {
       sendBtn.disabled = textInput.value.trim().length < 3;
-      textInput.style.borderColor = textInput.value.trim().length >= 3 ? 'var(--green-600)' : '';
+      textInput.style.borderColor = textInput.value.trim().length >= 3 ? 'var(--accent-500)' : '';
     });
     const mostrarErro = (msg) => {
       textInput.style.borderColor = '#EF4444';
@@ -2344,7 +2852,7 @@ window.toggleShopCategory = function(el) {
   div.dataset.cat = catName;
   div.innerHTML = items.map(i =>
     `<label class="shopping-item" style="display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer;">
-      <input type="checkbox" style="accent-color:#52B788;width:18px;height:18px;cursor:pointer;" onchange="this.parentElement.classList.toggle('checked')">
+      <input type="checkbox" style="accent-color:#00D68F;width:18px;height:18px;cursor:pointer;" onchange="this.parentElement.classList.toggle('checked')">
       <span>${i}</span>
     </label>`
   ).join('');
@@ -2355,14 +2863,17 @@ window.toggleShopCategory = function(el) {
 // ---- Dark Mode Toggle ----
 function toggleTheme() {
   const html = document.documentElement;
-  const isDark = html.getAttribute('data-theme') === 'dark';
-  html.setAttribute('data-theme', isDark ? 'light' : 'dark');
-  localStorage.setItem('nutricare_theme', isDark ? 'light' : 'dark');
-  // Atualizar ícone do botão se ele existir
+  const hasDark = html.getAttribute('data-theme') === 'dark';
+  if (hasDark) {
+    html.removeAttribute('data-theme');
+    localStorage.setItem('nutricare_theme', 'dark');
+  } else {
+    html.setAttribute('data-theme', 'dark');
+    localStorage.setItem('nutricare_theme', 'light');
+  }
   document.querySelectorAll('#theme-toggle-btn, .menu-brand-badge .header-theme-btn').forEach(btn => {
-    btn.textContent = isDark ? '🌙' : '☀️';
+    btn.textContent = hasDark ? '🌙' : '☀️';
   });
-  // Recriar gráficos se existem
   if (window._chartMeals || window._chartMacros) {
     setTimeout(initCharts, 50);
   }
@@ -2370,14 +2881,13 @@ function toggleTheme() {
 
 function initTheme() {
   const saved = localStorage.getItem('nutricare_theme');
-  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const isDark = saved === 'dark' || (!saved && prefersDark);
-  if (isDark) {
+  // Só ativa tema claro se salvou 'light' explicitamente
+  const isLight = saved === 'light';
+  if (isLight) {
     document.documentElement.setAttribute('data-theme', 'dark');
   }
-  // Atualizar ícone dos botões de tema (se já existirem no DOM)
   document.querySelectorAll('#theme-toggle-btn, .menu-brand-badge .header-theme-btn').forEach(btn => {
-    btn.textContent = isDark ? '☀️' : '🌙';
+    btn.textContent = isLight ? '☀️' : '🌙';
   });
 }
 
@@ -2396,6 +2906,61 @@ function registerSW() {
 window.addEventListener('DOMContentLoaded', () => {
   initTheme();
   registerSW();
+
+  // Check Stripe redirect params
+  const params = new URLSearchParams(window.location.search);
+  const premiumStatus = params.get('premium');
+  const sessionId = params.get('session_id');
+
+  if (premiumStatus === 'success' && sessionId) {
+    // Limpa URL sem recarregar
+    window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
+    // Aguarda loading + verifica pagamento
+    setTimeout(async () => {
+      const loading = $c('loading-screen');
+      if (loading) loading.classList.add('hidden');
+      dispatch(null, null);
+      const pago = await verificarPremiumSucesso(sessionId);
+      if (pago) {
+        renderPremiumAtivado(getPremiumEmail());
+      } else {
+        document.getElementById('screen-container').innerHTML = `
+          <div class="screen" style="display:flex;align-items:center;justify-content:center;padding:40px;background:var(--bg-deep);">
+            <div style="text-align:center;max-width:360px;">
+              <p style="font-size:3rem;margin-bottom:12px;">⏳</p>
+              <h2 style="font-size:1.3rem;margin-bottom:8px;">Pagamento não confirmado</h2>
+              <p style="color:var(--text-secondary);font-size:0.88rem;line-height:1.6;margin-bottom:20px;">
+                Seu pagamento pode ainda estar sendo processado. Se o valor foi debitado, entre em contato conosco.
+              </p>
+              <button class="btn-primary" onclick="dispatch('onboarding')">Ir para o Menu</button>
+            </div>
+          </div>`;
+      }
+    }, 1400);
+    return;
+  }
+
+  if (premiumStatus === 'cancel') {
+    window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
+    setTimeout(() => {
+      const loading = $c('loading-screen');
+      if (loading) loading.classList.add('hidden');
+      dispatch(null, null);
+      setTimeout(() => {
+        document.getElementById('screen-container').innerHTML = `
+          <div class="screen" style="display:flex;align-items:center;justify-content:center;padding:40px;background:var(--bg-deep);">
+            <div style="text-align:center;max-width:360px;animation:slideUp 0.3s ease;">
+              <p style="font-size:3rem;margin-bottom:12px;">❌</p>
+              <h2 style="font-size:1.3rem;margin-bottom:8px;">Pagamento cancelado</h2>
+              <p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:20px;">Fique à vontade para tentar novamente quando quiser.</p>
+              <button class="btn-primary" onclick="dispatch('ver_planos')">Ver Planos</button>
+            </div>
+          </div>`;
+      }, 300);
+    }, 1200);
+    return;
+  }
+
   setTimeout(() => {
     dispatch(null, null);
     const loading = $c('loading-screen');

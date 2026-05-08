@@ -3,7 +3,7 @@ title NutriCare - Sistema Completo
 cd /d "C:\Users\johnn\projeto nutriçao"
 
 echo ========================================
-echo    🌿 NutriCare - Sistema de Consulta
+echo    NutriCare - Sistema de Consulta
 echo    Nutricional
 echo ========================================
 echo.
@@ -17,5 +17,10 @@ echo Pressione CTRL+C para parar ambos
 echo ========================================
 echo.
 
-npm run dev
+start "NutriCare WEB" /B cmd /c npx serve -s . -l 3000 --cors
+start "NutriCare API" /B cmd /c node server/server.js
+
+echo Servidores iniciados!
+echo Abra http://localhost:3000 no navegador
+echo.
 pause

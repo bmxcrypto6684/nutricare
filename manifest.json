@@ -5,8 +5,8 @@
   "start_url": "/nutricare/",
   "display": "standalone",
   "orientation": "portrait",
-  "theme_color": "#2D6A4F",
-  "background_color": "#F0FDF4",
+  "theme_color": "#07070D",
+  "background_color": "#07070D",
   "categories": ["health", "nutrition", "lifestyle"],
   "lang": "pt-BR",
   "icons": [

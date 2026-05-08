@@ -13,5 +13,8 @@
   "devDependencies": {
     "concurrently": "^9.1.0",
     "serve": "^14.2.6"
+  },
+  "dependencies": {
+    "chart.js": "^4.5.1"
   }
 }

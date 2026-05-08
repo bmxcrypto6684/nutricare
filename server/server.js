@@ -1,12 +1,37 @@
 // ============================================================
 // NutriCare API — Backend de Consulta Nutricional
 // ============================================================
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
+
+// ---- Global Error Handlers (evita crash do servidor) ----
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('\n⚠️ UNHANDLED REJECTION:', reason?.message || reason);
+  console.error('   O servidor continua rodando normalmente.');
+});
+process.on('uncaughtException', (err) => {
+  console.error('\n⚠️ UNCAUGHT EXCEPTION:', err.message);
+  console.error('   O servidor continua rodando normalmente.');
+});
+
+let stripe;
+try {
+  const StripeKey = process.env.STRIPE_SECRET_KEY;
+  if (StripeKey && StripeKey !== 'sk_test_placeholder') {
+    stripe = require('stripe')(StripeKey);
+  } else {
+    console.warn('\n⚠️ STRIPE_SECRET_KEY não configurada. Pagamentos premium desabilitados.');
+    stripe = null;
+  }
+} catch (err) {
+  console.error('\n⚠️ Erro ao inicializar Stripe:', err.message);
+  stripe = null;
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -30,7 +55,7 @@ app.use('/api/', apiLimiter);
 // ---- Middleware ----
 const CORS_ORIGINS = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',')
-  : ['http://localhost:3000', 'http://localhost:3001', 'https://johnnmacedo.github.io'];
+  : [/^http:\/\/localhost(:\d+)?$/, 'https://johnnmacedo.github.io'];
 app.use(cors({ origin: CORS_ORIGINS, methods: ['GET', 'POST'] }));
 app.use(express.json({ limit: '500kb' })); // reduzido de 10mb para 500kb
 app.use(morgan('\x1b[36m:method\x1b[0m :url \x1b[33m:status\x1b[0m \x1b[90m:response-time ms\x1b[0m'));
@@ -101,6 +126,78 @@ app.get('/api/health', (req, res) => {
     version: '1.0.0',
     timestamp: new Date().toISOString()
   });
+});
+
+// ============================================================
+// POST /api/create-checkout-session — Inicia pagamento Stripe
+// ============================================================
+app.post('/api/create-checkout-session', async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(503).json({ success: false, error: 'Pagamento indisponível no momento' });
+    }
+
+    const { planType } = req.body;
+
+    let priceData;
+    if (planType === 'premium') {
+      priceData = {
+        price_data: {
+          currency: 'brl',
+          product_data: { name: 'NutriCare Premium' },
+          unit_amount: 4990, // R$ 49,90
+        },
+      };
+    } else {
+      return res.status(400).json({ success: false, error: 'Tipo de plano inválido' });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [{ ...priceData, quantity: 1 }],
+      success_url: `${process.env.BASE_URL || 'http://localhost:3000'}/?premium=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.BASE_URL || 'http://localhost:3000'}/?premium=cancel`,
+    });
+
+    res.json({ success: true, url: session.url, sessionId: session.id });
+  } catch (err) {
+    console.error('\n❌ Erro ao criar checkout Stripe:', err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: 'Erro ao iniciar pagamento' });
+    }
+  }
+});
+
+// ============================================================
+// GET /api/verify-payment — Verifica status do pagamento
+// ============================================================
+app.get('/api/verify-payment', async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.json({ success: true, paid: false, status: 'stripe_indisponivel' });
+    }
+
+    const { session_id } = req.query;
+    if (!session_id) {
+      return res.status(400).json({ success: false, error: 'session_id é obrigatório' });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(session_id);
+    const paid = session.payment_status === 'paid';
+
+    res.json({
+      success: true,
+      paid,
+      status: session.payment_status,
+      customer_email: session.customer_details?.email || null
+    });
+  } catch (err) {
+    console.error('\n❌ Erro ao verificar pagamento:', err.message);
+    if (!res.headersSent) {
+      res.json({ success: true, paid: false, status: 'erro_verificacao' });
+    }
+  }
 });
 
 // ============================================================
@@ -479,6 +576,9 @@ app.listen(PORT, () => {
   console.log(`  URL:    http://localhost:${PORT}`);
   console.log(`  Health: http://localhost:${PORT}/api/health`);
   console.log(`  API:    POST http://localhost:${PORT}/api/consulta`);
+  console.log(`  Stripe: POST http://localhost:${PORT}/api/create-checkout-session`);
+  console.log(`  Stripe: GET  http://localhost:${PORT}/api/verify-payment`);
   console.log(`  Rate limit: 20 req/min por IP`);
+  console.log(`  Stripe:     ${stripe ? '✅ Configurado' : '⏳ Aguardando chave (SK_TEST)'}`);
   console.log('='.repeat(48) + '\n');
 });
