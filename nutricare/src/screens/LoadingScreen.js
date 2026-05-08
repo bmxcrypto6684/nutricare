@@ -38,9 +38,9 @@ export default function LoadingScreen({ route, navigation }) {
         return prev + 1;
       });
       setProgress((prev) => Math.min(prev + 0.22, 1));
-    }, 900);
+    }, 500);
 
-    // Simula o tempo de processamento da IA
+    // Processa os dados e navega para o plano
     const timer = setTimeout(() => {
       clearInterval(stepInterval);
       setProgress(1);
@@ -50,8 +50,8 @@ export default function LoadingScreen({ route, navigation }) {
 
       setTimeout(() => {
         navigation.replace('PlanoAlimentar', { userData, plano });
-      }, 600);
-    }, 5000);
+      }, 300);
+    }, 2000);
 
     return () => {
       clearInterval(stepInterval);

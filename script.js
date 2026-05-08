@@ -1246,7 +1246,7 @@ async function sendToBackend(profile) {
     height: profile.height
   });
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3000);
+  const timeout = setTimeout(() => controller.abort(), 1500);
   try {
     const res = await fetch(`${API_URL}/consulta`, {
       method: 'POST',
@@ -1334,19 +1334,39 @@ function render(response) {
       return;
     case 'analise_loading':
       container.innerHTML = renderAnaliseLoader();
+      startLoaderAnimation();
       setTimeout(async () => {
         console.log('⏳ [NutriCare] Iniciando análise dos dados...');
-        const result = await sendToBackend(STATE.profile);
-        if (result && result.success) {
-          STATE.plano = result.data;
-          STATE.lastDiagnostico = (result.data.diagnostico?.resumo || []).join(' · ') || STATE.profile.goal || '';
-          STATE.lastPlano = true;
-          console.log('📊 [NutriCare] Plano carregado do backend');
-        } else {
-          console.log('💻 [NutriCare] Usando geração local (fallback)');
+        try {
+          // 1. Ping rápido no servidor (500ms) pra não travar
+          const saudavel = await fetch(`${API_URL}/health`, {
+            signal: AbortSignal.timeout(500)
+          }).then(r => r.ok).catch(() => false);
+
+          // 2. Só chama a API se o servidor estiver vivo
+          let result = null;
+          if (saudavel) {
+            result = await Promise.race([
+              sendToBackend(STATE.profile),
+              new Promise(r => setTimeout(() => r(null), 1500))
+            ]);
+          } else {
+            console.log('💻 [NutriCare] Servidor offline, gerando localmente');
+          }
+
+          if (result && result.success) {
+            STATE.plano = result.data;
+            STATE.lastDiagnostico = (result.data.diagnostico?.resumo || []).join(' · ') || STATE.profile.goal || '';
+            STATE.lastPlano = true;
+            console.log('📊 [NutriCare] Plano carregado do backend');
+          } else {
+            console.log('💻 [NutriCare] Usando geração local (fallback)');
+          }
+        } catch (err) {
+          console.error('❌ [NutriCare] Erro inesperado na análise:', err);
         }
         dispatch('gerar_analise', null);
-      }, 2000);
+      }, 100);
       return;
     case 'analise':
       container.innerHTML = renderAnalise(response);
@@ -1754,9 +1774,26 @@ function renderAnaliseLoader() {
           </svg>
         </div>
         <h2 style="color:white;margin-top:24px;font-size:1.3rem;">Analisando seus dados...</h2>
-        <p style="color:rgba(255,255,255,0.7);margin-top:8px;font-size:0.9rem;">Montando seu plano personalizado</p>
+        <p id="loader-status" style="color:rgba(255,255,255,0.7);margin-top:8px;font-size:0.9rem;">Montando seu plano personalizado</p>
       </div>
     </div>`;
+}
+
+function startLoaderAnimation() {
+  const messages = [
+    'Calculando seu metabolismo...',
+    'Analisando seus hábitos...',
+    'Montando refeições ideais...',
+    'Ajustando macronutrientes...',
+    'Quase lá...'
+  ];
+  const el = document.getElementById('loader-status');
+  if (!el) return;
+  let i = 0;
+  el._interval = setInterval(function() {
+    if (i < messages.length) el.textContent = messages[i];
+    i++;
+  }, 700);
 }
 
 function renderAnalise(resp) {
