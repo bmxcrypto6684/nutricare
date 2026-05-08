@@ -2,7 +2,7 @@
   "name": "NutriCare — Consulta Nutricional",
   "short_name": "NutriCare",
   "description": "Sua consulta nutricional personalizada — plano alimentar, gráficos e acompanhamento",
-  "start_url": "/",
+  "start_url": "/nutricare/",
   "display": "standalone",
   "orientation": "portrait",
   "theme_color": "#2D6A4F",

@@ -8,7 +8,11 @@ on:
       - 'index.html'
       - 'style.css'
       - 'script.js'
+      - 'sw.js'
+      - 'manifest.json'
+      - '.nojekyll'
       - 'favicon.png'
+      - 'icons/*'
       - '.github/workflows/deploy.yml'
 
 permissions:

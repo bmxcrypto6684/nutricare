@@ -1,13 +1,17 @@
-const CACHE_NAME = 'nutricare-v4';
+const CACHE_NAME = 'nutricare-v5';
+
+// Detecta base path automaticamente (funciona em subpastas tipo /nutricare/)
+const BASE = self.location.pathname.replace(/sw\.js$/, '');
+
 const STATIC_ASSETS = [
-  '/',
-  '/index.html',
-  '/style.css',
-  '/script.js',
-  '/manifest.json',
-  '/favicon.png',
-  '/icons/icon-192.svg',
-  '/icons/icon-512.svg'
+  BASE,
+  BASE + 'index.html',
+  BASE + 'style.css',
+  BASE + 'script.js',
+  BASE + 'manifest.json',
+  BASE + 'favicon.png',
+  BASE + 'icons/icon-192.svg',
+  BASE + 'icons/icon-512.svg'
 ];
 
 const CDN_CACHE = 'nutricare-cdn-v1';
@@ -46,7 +50,7 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
 
   // API calls: network-first (GET only)
-  if (url.pathname.startsWith('/api/')) {
+  if (url.pathname.startsWith(BASE + 'api/')) {
     if (request.method === 'GET') {
       event.respondWith(networkFirst(request));
     }
@@ -75,7 +79,7 @@ async function cacheFirst(request) {
     }
     return response;
   } catch (err) {
-    return caches.match('/');
+    return caches.match(BASE);
   }
 }
 
