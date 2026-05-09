@@ -1530,6 +1530,230 @@ h1 {
   box-shadow: 0 0 16px var(--accent-glow);
 }
 
+.premium-status-badge {
+  display: inline-block;
+  padding: 4px 14px;
+  background: linear-gradient(135deg, #F59E0B, #D97706);
+  color: #FFFFFF;
+  border-radius: 12px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.4);
+}
+
+/* === Modal Liberar Premium === */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+.modal-overlay.modal-open {
+  opacity: 1;
+}
+.premium-modal {
+  position: relative;
+  background: #16163a;
+  border: 1px solid rgba(139, 92, 246, 0.15);
+  border-radius: 20px;
+  width: 88%;
+  max-width: 380px;
+  padding: 28px 24px 24px;
+  text-align: center;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  animation: modalPop 0.3s ease;
+}
+@keyframes modalPop {
+  0% { transform: scale(0.95); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.premium-modal-close {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  background: none;
+  border: none;
+  color: rgba(255,255,255,0.3);
+  font-size: 1.4rem;
+  cursor: pointer;
+  padding: 2px 8px;
+  line-height: 1;
+  transition: color 0.2s;
+}
+.premium-modal-close:hover {
+  color: #fff;
+}
+.premium-modal-icon {
+  font-size: 2.2rem;
+  margin-bottom: 4px;
+  display: block;
+}
+.premium-modal-title {
+  font-size: 1.25rem;
+  margin: 0 0 4px;
+  color: #fff;
+  font-weight: 700;
+}
+.premium-modal-sub {
+  font-size: 0.78rem;
+  color: rgba(255,255,255,0.4);
+  margin: 0 0 20px;
+}
+.premium-modal-body {
+  text-align: left;
+}
+.premium-modal-label {
+  display: block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: rgba(196, 181, 253, 0.6);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+.premium-modal-input {
+  width: 100%;
+  padding: 13px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(139, 92, 246, 0.12);
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-size: 0.95rem;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.2s, background 0.2s;
+}
+.premium-modal-input::placeholder {
+  color: rgba(255,255,255,0.15);
+  font-size: 0.9rem;
+}
+.premium-modal-input:focus {
+  border-color: rgba(139, 92, 246, 0.4);
+  background: rgba(0, 0, 0, 0.45);
+}
+.premium-modal-helper {
+  display: block;
+  font-size: 0.68rem;
+  color: rgba(255,255,255,0.18);
+  margin-top: 4px;
+  margin-bottom: 16px;
+  font-style: italic;
+}
+.premium-modal-btn {
+  width: 100%;
+  padding: 14px 20px;
+  border-radius: 12px;
+  border: none;
+  background: linear-gradient(135deg, #6366F1, #8B5CF6);
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.2s, transform 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.premium-modal-btn:hover {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+.premium-modal-btn:active {
+  transform: translateY(0);
+}
+.premium-modal-btn .btn-icon {
+  font-size: 1rem;
+}
+.premium-modal-btn.loading {
+  pointer-events: none;
+  opacity: 0.7;
+}
+.premium-modal-btn.loading .btn-text {
+  visibility: hidden;
+}
+.premium-modal-btn.loading .btn-icon {
+  display: none;
+}
+.premium-modal-btn .spinner {
+  display: none;
+}
+.premium-modal-btn.loading .spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255,255,255,0.2);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+/* === Tela Premium Ativado === */
+.premium-success {
+  text-align: center;
+  max-width: 380px;
+  animation: slideUp 0.5s ease;
+}
+.premium-success-stars {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  font-size: 2rem;
+  margin-bottom: 8px;
+  animation: pulse 2s ease-in-out infinite;
+}
+.premium-success-icon {
+  font-size: 4rem;
+  margin-bottom: 12px;
+}
+.premium-success-title {
+  font-size: 1.8rem;
+  margin: 0 0 20px;
+  background: linear-gradient(135deg, #F59E0B, #FFD700);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.premium-success-card {
+  background: rgba(108, 99, 255, 0.08);
+  border: 1px solid rgba(108, 99, 255, 0.2);
+  border-radius: 16px;
+  padding: 18px 20px;
+  margin-bottom: 16px;
+  text-align: left;
+}
+.success-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  font-size: 0.9rem;
+}
+.success-row span {
+  color: var(--text-secondary);
+}
+.success-row strong {
+  color: #fff;
+}
+.premium-success-msg {
+  color: #22C55E;
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin: 0 0 24px;
+}
+.premium-success-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .menu-top h1 {
   font-size: 1.7rem;
   line-height: 1.35;

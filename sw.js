@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nutricare-v14';
+const CACHE_NAME = 'nutricare-v22';
 
 // Detecta base path automaticamente (funciona em subpastas tipo /nutricare/)
 const BASE = self.location.pathname.replace(/sw\.js$/, '');

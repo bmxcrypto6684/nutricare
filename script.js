@@ -35,6 +35,7 @@ function engine(action, payload) {
       const btnSairPremium = isPremium()
         ? [{ text: '🔓 Sair do Premium', action: 'sair_premium', variant: 'outline' }]
         : [];
+      const btnLiberarCliente = { text: '⭐ Liberar Premium →', action: 'liberar_cliente', variant: 'outline' };
       return {
         screen: 'onboarding',
         message: '',
@@ -46,6 +47,7 @@ function engine(action, payload) {
             ...btnProgresso,
             { text: 'ℹ️ Como funciona', action: 'como_funciona', variant: 'outline' },
             ...btnSairPremium,
+            btnLiberarCliente,
             { text: '💰 Ver planos', action: 'ver_planos', variant: 'outline' }
           ]}
         ],
@@ -86,7 +88,7 @@ function engine(action, payload) {
         message: '',
         components: [
           { type: 'back', action: 'voltar_menu' },
-          { type: 'title', text: 'Nossos planos' },
+          { type: 'title', text: 'Nossos planos', subtitle: 'Escolha a opção ideal para sua jornada nutricional' },
           { type: 'pricing', items: [
             {
               badge: 'Básico', value: 'Grátis', recommended: false,
@@ -1515,6 +1517,7 @@ const ACTION_ROUTES = {
   'agendar': 'agendar',
   'duvidas': 'duvidas',
   'assinar_premium': 'assinar_premium',
+  'liberar_cliente': 'onboarding',
   'sair_premium': 'onboarding'
 };
 
@@ -1597,7 +1600,8 @@ function renderPremiumAtivado(email) {
         <div style="font-size:4rem;margin-bottom:16px;animation:pulse 2s ease-in-out infinite;">🎉</div>
         <h1 style="font-size:1.6rem;margin-bottom:8px;">Premium Ativado!</h1>
         <p style="color:var(--text-secondary);font-size:0.9rem;line-height:1.7;margin-bottom:20px;">
-          Agora você tem acesso a todos os recursos premium do NutriCare.
+          Agora você tem acesso a todos os recursos premium do NutriCare.<br>
+          <span style="color:var(--accent-500);font-weight:600;">✅ Válido por 30 dias</span>
           ${email ? `<br><span style="color:var(--text-tertiary);font-size:0.8rem;">Confirmação enviada para ${email}</span>` : ''}
         </p>
         <div style="display:flex;flex-direction:column;gap:10px;">
@@ -1609,8 +1613,28 @@ function renderPremiumAtivado(email) {
 }
 
 // ---- Premium Feature Gates ----
+function getPremiumDiasRestantes() {
+  const dataStr = localStorage.getItem('nutricare_premium_date');
+  if (!dataStr) return 0;
+  const dataAtivacao = new Date(dataStr);
+  const agora = new Date();
+  const diffMs = agora - dataAtivacao;
+  const diffDias = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  return Math.max(0, 30 - diffDias);
+}
+
 function isPremium() {
-  return localStorage.getItem('nutricare_premium') === 'true';
+  const val = localStorage.getItem('nutricare_premium');
+  if (val !== 'true') return false;
+
+  const diasRestantes = getPremiumDiasRestantes();
+  if (diasRestantes <= 0) {
+    // Premium expirado — limpa automaticamente
+    localStorage.removeItem('nutricare_premium');
+    localStorage.removeItem('nutricare_premium_date');
+    return false;
+  }
+  return true;
 }
 
 function upgradeRedirect() {
@@ -1626,6 +1650,99 @@ function upgradeRedirect() {
           Assine agora e tenha acesso a todos os recursos.
         </p>
         <button class="btn-primary" onclick="dispatch('ver_planos')">💰 Ver planos</button>
+      </div>
+    </div>`;
+}
+
+// ---- Modal Liberar Premium (simplificado) ----
+function exibirModalLiberarCliente() {
+  const overlay = document.createElement('div');
+  overlay.id = 'modal-liberar-cliente';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="premium-modal">
+      <button class="premium-modal-close" onclick="fecharModal()">&times;</button>
+      <div class="premium-modal-icon">⭐</div>
+      <h2 class="premium-modal-title">Liberar Premium</h2>
+      <p class="premium-modal-sub">Ative o plano Premium para seu cliente</p>
+      <div class="premium-modal-body">
+        <label class="premium-modal-label">Nome do Cliente</label>
+        <input class="premium-modal-input" id="mc-nome" type="text" placeholder="Ex: Maria Silva" />
+        <span class="premium-modal-helper">Deixe em branco para "Cliente"</span>
+
+        <button class="premium-modal-btn" id="mc-confirmar-btn" onclick="confirmarLiberacao()">
+          <span class="btn-icon">⭐</span>
+          <span class="btn-text">Liberar Premium (30 dias)</span>
+          <span class="spinner"></span>
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add('modal-open'));
+
+  // Valor fixo 30 dias — sem seleção de tempo
+}
+
+function fecharModal() {
+  const overlay = document.getElementById('modal-liberar-cliente');
+  if (overlay) {
+    overlay.classList.remove('modal-open');
+    overlay.addEventListener('transitionend', () => overlay.remove(), { once: true });
+    setTimeout(() => { if (overlay.parentNode) overlay.remove(); }, 300);
+  }
+}
+
+function confirmarLiberacao() {
+  const btn = document.getElementById('mc-confirmar-btn');
+  btn.classList.add('loading');
+
+  const nome = document.getElementById('mc-nome').value.trim() || 'Cliente';
+  const tempo = 30;
+  const dataAtivacao = new Date();
+  const dataExpiracao = new Date(dataAtivacao.getTime() + tempo * 24 * 60 * 60 * 1000);
+
+  // Ativa premium
+  localStorage.setItem('nutricare_premium', 'true');
+  localStorage.setItem('nutricare_premium_date', dataAtivacao.toISOString());
+
+  // Salva dados do cliente
+  const liberacao = {
+    cliente: nome,
+    id: 'CLI-' + Date.now().toString(36).toUpperCase(),
+    tipo: 'premium',
+    tempo: tempo,
+    dataAtivacao: dataAtivacao.toISOString(),
+    dataExpiracao: dataExpiracao.toISOString(),
+    status: 'ativo'
+  };
+  localStorage.setItem('nutricare_liberacao', JSON.stringify(liberacao));
+
+  // Fecha modal e mostra tela de sucesso
+  fecharModal();
+  exibirTelaPremiumAtivado(nome, dataExpiracao);
+}
+
+function exibirTelaPremiumAtivado(nome, dataExpiracao) {
+  const container = document.getElementById('screen-container');
+  if (!container) return;
+  container.innerHTML = `
+    <div class="screen" style="display:flex;align-items:center;justify-content:center;padding:40px;background:var(--bg-deep);">
+      <div class="premium-success">
+        <div class="premium-success-stars">
+          <span>⭐</span><span>⭐</span><span>⭐</span>
+        </div>
+        <div class="premium-success-icon">🏆</div>
+        <h2 class="premium-success-title">Premium Ativado!</h2>
+        <div class="premium-success-card">
+          <div class="success-row"><span>Cliente</span> <strong>${escapeHtml(nome)}</strong></div>
+          <div class="success-row"><span>Plano</span> <strong>⭐ Premium</strong></div>
+          <div class="success-row"><span>Validade</span> <strong>${dataExpiracao.toLocaleDateString('pt-BR')}</strong></div>
+        </div>
+        <p class="premium-success-msg">✅ Acesso liberado com sucesso!</p>
+        <div class="premium-success-btns">
+          <button class="btn-primary" onclick="dispatch('iniciar_consulta')">▶️ Iniciar Consulta</button>
+          <button class="btn-outline" onclick="dispatch(null, null)">📋 Ir para o Menu</button>
+        </div>
       </div>
     </div>`;
 }
@@ -1709,6 +1826,27 @@ function dispatch(action, payload) {
     console.log(`   → Tela: ${STATE.screen}`);
   }
 
+  // Liberar entrada do cliente — abre modal profissional
+  if (action === 'liberar_cliente') {
+    if (isPremium()) {
+      const dias = getPremiumDiasRestantes();
+      alert(`⭐ Você já possui Premium ativo!\n⏳ ${dias} dias restantes.`);
+    } else {
+      exibirModalLiberarCliente();
+    }
+    return;
+  }
+
+  // Sair do premium — limpa e volta pro básico
+  if (action === 'sair_premium') {
+    localStorage.removeItem('nutricare_premium');
+    localStorage.removeItem('nutricare_premium_date');
+    resetState();
+    const response = engine(action, payload);
+    render(response);
+    return;
+  }
+
   // Reseta estado ao iniciar nova consulta (evita pular perguntas na 2ª vez)
   if (action === 'iniciar_consulta') {
     STATE.anamneseStep = 0;
@@ -1723,12 +1861,6 @@ function dispatch(action, payload) {
       medications: '', difficulties: [], emotionalEating: '',
       motivation: 3, extraInfo: ''
     });
-  }
-
-  // Sai do Premium (limpa localStorage e volta ao plano básico)
-  if (action === 'sair_premium') {
-    localStorage.removeItem('nutricare_premium');
-    localStorage.removeItem('nutricare_premium_date');
   }
 
   // Save user text input for bubble display
@@ -1792,6 +1924,11 @@ function render(response) {
       bindClicks(container);
       return;
     case 'assinar_premium':
+      if (isPremium()) {
+        const dias = getPremiumDiasRestantes();
+        alert(`⭐ Você já possui Premium ativo!\n⏳ ${dias} dias restantes.`);
+        return;
+      }
       iniciarCheckoutPremium();
       return;
     case 'analise_loading':
@@ -2170,6 +2307,9 @@ function renderComponent(comp, screen) {
           <button class="followup-btn" data-action="${i.action}">
             <span>${i.icon}</span> ${i.text}
           </button>`).join('')}
+        <button class="followup-btn voltar-btn" data-action="voltar_menu" style="margin-top:8px;border-color:var(--border-color);color:var(--text-secondary);">
+          <span>🔙</span> Voltar
+        </button>
       </div>`;
 
     default:
@@ -2186,6 +2326,7 @@ function renderOnboarding(resp) {
       <div class="menu-container">
         <div class="menu-top">
           <div class="menu-brand-badge">NutriCare <button class="header-theme-btn" style="position:static;margin-left:8px;" onclick="toggleTheme()" title="Alternar tema">🌙</button></div>
+          ${isPremium() ? `<div class="premium-status-badge">⭐ Premium &mdash; ${getPremiumDiasRestantes()} dias restantes</div>` : ''}
           <h1>${hero ? hero.title : ''}</h1>
           ${hero && hero.subtitle ? `<p class="menu-subtitle">${hero.subtitle}</p>` : ''}
         </div>
