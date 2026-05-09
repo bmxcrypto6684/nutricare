@@ -32,6 +32,9 @@ function engine(action, payload) {
       const btnProgresso = isPremium()
         ? [{ text: '📈 Meu Progresso', action: 'ver_progresso', variant: 'outline' }]
         : [];
+      const btnSairPremium = isPremium()
+        ? [{ text: '🔓 Sair do Premium', action: 'sair_premium', variant: 'outline' }]
+        : [];
       return {
         screen: 'onboarding',
         message: '',
@@ -42,6 +45,7 @@ function engine(action, payload) {
             { text: '🗂️ Histórico', action: 'ver_historico', variant: 'outline' },
             ...btnProgresso,
             { text: 'ℹ️ Como funciona', action: 'como_funciona', variant: 'outline' },
+            ...btnSairPremium,
             { text: '💰 Ver planos', action: 'ver_planos', variant: 'outline' }
           ]}
         ],
@@ -1510,7 +1514,8 @@ const ACTION_ROUTES = {
   'reiniciar': 'reiniciar',
   'agendar': 'agendar',
   'duvidas': 'duvidas',
-  'assinar_premium': 'assinar_premium'
+  'assinar_premium': 'assinar_premium',
+  'sair_premium': 'onboarding'
 };
 
 // ---- State Reset ----
@@ -1718,6 +1723,12 @@ function dispatch(action, payload) {
       medications: '', difficulties: [], emotionalEating: '',
       motivation: 3, extraInfo: ''
     });
+  }
+
+  // Sai do Premium (limpa localStorage e volta ao plano básico)
+  if (action === 'sair_premium') {
+    localStorage.removeItem('nutricare_premium');
+    localStorage.removeItem('nutricare_premium_date');
   }
 
   // Save user text input for bubble display
