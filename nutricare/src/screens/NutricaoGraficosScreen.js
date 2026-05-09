@@ -470,7 +470,7 @@ const styles = StyleSheet.create({
     left: '50%',
     width: '50%',
     height: '100%',
-    transformOrigin: '0 50%',
+    transformOrigin: 'left center',
   },
   doughnutHole: {
     borderRadius: 999,
