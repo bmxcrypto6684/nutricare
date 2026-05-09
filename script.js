@@ -373,7 +373,7 @@ function engine(action, payload) {
 
     // ============================
     case 'plano': {
-      const meals = gerarRefeicoes(STATE.profile);
+      const meals = gerarRefeicoes(STATE.profile, isPremium());
       const premiumBtns = isPremium() ? [
         { text: '🔄 Ver substituições', action: 'ver_subs', variant: 'secondary' },
         { text: '🛒 Gerar lista de compras', action: 'ver_lista', variant: 'secondary' },
@@ -1001,11 +1001,49 @@ function gerarReceitasParaRefeicao(mealName, goal) {
 }
 
 // ---- Refeições ----
-function gerarRefeicoes(p) {
+function gerarRefeicoes(p, isPremium = true) {
   const isLoss = p.goal && p.goal.includes('Emagrecimento');
   const isGain = p.goal && p.goal.includes('massa muscular');
 
-  return [
+  // Plano básico: 1 opção simples por refeição, sem substituições
+  if (!isPremium) {
+    return [
+      {
+        icon: '🌅', name: 'Café da Manhã', time: '07:00 - 08:00',
+        main: isLoss
+          ? '🥣 2 ovos mexidos + 1 fatia pão integral + café'
+          : '🥣 3 ovos + 2 fatias pão integral + 1 fruta'
+      },
+      {
+        icon: '🍎', name: 'Lanche da Manhã', time: '10:00',
+        main: isLoss
+          ? '🥣 1 fruta + 5 castanhas'
+          : '🥣 1 fruta + 10 castanhas'
+      },
+      {
+        icon: '🍚', name: 'Almoço', time: '12:00 - 13:00',
+        main: isLoss
+          ? '🥣 4 col de arroz + 1 concha feijão + 120g proteína + salada à vontade'
+          : '🥣 6 col arroz + feijão + 150g proteína + salada + azeite'
+      },
+      {
+        icon: '🥤', name: 'Lanche da Tarde', time: '15:30',
+        main: isLoss
+          ? '🥣 1 fruta + café sem açúcar'
+          : isGain
+            ? '🥣 Vitamina de banana com whey + aveia'
+            : '🥣 1 fruta + castanhas'
+      },
+      {
+        icon: '🌙', name: 'Jantar', time: '19:00 - 20:00',
+        main: isLoss
+          ? '🥣 Omelete 2 ovos com espinafre + salada'
+          : '🥣 150g salmão + quinoa + vegetais'
+      }
+    ];
+  }
+
+  // Plano premium: 3 opções detalhadas + substituições
     {
       icon: '🌅', name: 'Café da Manhã', time: '07:00 - 08:00',
       main: isLoss
@@ -1705,7 +1743,7 @@ function renderUserBubble() {
 }
 
 window.showMealDetail = function(idx) {
-  const meals = gerarRefeicoes(STATE.profile);
+  const meals = gerarRefeicoes(STATE.profile, true);
   const meal = meals[idx];
   if (!meal) return;
   const receitas = gerarReceitasParaRefeicao(meal.name, STATE.profile.goal);
@@ -2384,7 +2422,7 @@ function renderNutritionCharts(resp) {
 function exportarPDF() {
   const p = STATE.profile;
   const plano = STATE.plano || {};
-  const refeicoes = gerarRefeicoes(p);
+  const refeicoes = gerarRefeicoes(p, true);
   const sups = gerarSuplementos(p);
   const lista = gerarListaCompras(p);
   const nd = calcularGET(p) ? gerarDadosNutricionais(p) : null;
