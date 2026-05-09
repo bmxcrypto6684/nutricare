@@ -63,7 +63,11 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Static assets: cache-first
+  // Static assets: cache-first (exceto script.js que é network-first)
+  if (url.pathname.includes('script.js')) {
+    event.respondWith(networkFirst(request));
+    return;
+  }
   event.respondWith(cacheFirst(request));
 });
 

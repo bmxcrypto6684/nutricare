@@ -2891,6 +2891,18 @@ function registerSW() {
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').then(reg => {
       console.log('📦 [PWA] Service Worker registrado:', reg.scope);
+      // Força atualização quando detectar novo SW
+      reg.onupdatefound = () => {
+        const installing = reg.installing;
+        if (installing) {
+          installing.onstatechange = () => {
+            if (installing.state === 'installed' && navigator.serviceWorker.controller) {
+              console.log('🆕 [PWA] Novo SW detectado — recarregando...');
+              window.location.reload();
+            }
+          };
+        }
+      };
     }).catch(err => {
       console.warn('⚠️ [PWA] Falha ao registrar SW:', err);
     });
