@@ -1044,6 +1044,7 @@ function gerarRefeicoes(p, isPremium = true) {
   }
 
   // Plano premium: 3 opções detalhadas + substituições
+  return [
     {
       icon: '🌅', name: 'Café da Manhã', time: '07:00 - 08:00',
       main: isLoss
