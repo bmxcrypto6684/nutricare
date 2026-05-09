@@ -2077,15 +2077,18 @@ function renderComponent(comp, screen) {
         </div>`;
     }
     case 'meal_plan':
-      return `<div class="result-section" style="margin-top:12px;"><div class="meal-plan">${comp.meals.map((m, idx) => `
-        <div class="meal-card">
-          <div class="meal-header" onclick="showMealDetail(${idx})">
+      return `<div class="result-section" style="margin-top:12px;"><div class="meal-plan">${comp.meals.map((m, idx) => {
+        const ehPremium = isPremium();
+        return `
+        <div class="meal-card${ehPremium ? '' : ' meal-card-basic'}">
+          <div class="meal-header"${ehPremium ? ` onclick="showMealDetail(${idx})"` : ''}>
             <div class="meal-header-left">
               <div class="meal-icon">${m.icon}</div>
               <div><div class="meal-name">${m.name}</div><div class="meal-time">${m.time}</div></div>
             </div>
-            <svg class="meal-toggle" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 6L8 10L12 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            ${ehPremium ? `<svg class="meal-toggle" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 6L8 10L12 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>` : ''}
           </div>
+          ${ehPremium ? `
           <div class="meal-body" style="max-height:0;overflow:hidden;transition:max-height 0.4s;">
             <div class="meal-description">${m.main.replace(/\n/g, '<br>')}</div>
             ${m.subs ? `<div class="meal-substitutions"><div class="meal-substitutions-label">🔄 Substituições</div><div class="meal-substitutions-text">${m.subs}</div></div>` : ''}
@@ -2093,8 +2096,11 @@ function renderComponent(comp, screen) {
               <div class="receitas-label">📖 Receitas sugeridas</div>
               ${gerarReceitasParaRefeicao(m.name, STATE.profile.goal)}
             </div>
-          </div>
-        </div>`).join('')}</div></div>`;
+          </div>` : `
+          <div class="meal-body-basic">
+            <div class="meal-description">${m.main.replace(/\n/g, '<br>')}</div>
+          </div>`}
+        </div>`}).join('')}</div></div>`;
 
     case 'shopping_grid':
       return `

@@ -984,6 +984,15 @@ h1 {
   backdrop-filter: var(--glass-blur);
 }
 
+.meal-card-basic {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  backdrop-filter: var(--glass-blur);
+  opacity: 0.85;
+}
+
 .meal-card:hover {
   border-color: rgba(0, 214, 143, 0.2);
   box-shadow: var(--shadow-sm), var(--glow-accent);
@@ -1049,6 +1058,12 @@ h1 {
 .meal-body.open {
   max-height: 500px;
   padding: 0 20px 20px;
+}
+
+.meal-body-basic {
+  padding: 0 20px 16px;
+  border-top: 1px solid var(--border-subtle);
+  margin: 0 4px;
 }
 
 .meal-description {
