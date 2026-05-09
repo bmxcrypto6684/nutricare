@@ -1751,9 +1751,11 @@ function render(response) {
         console.log('⏳ [NutriCare] Iniciando análise dos dados...');
         try {
           // 1. Ping rápido no servidor (500ms) pra não travar
-          const saudavel = await fetch(`${API_URL}/health`, {
-            signal: AbortSignal.timeout(500)
-          }).then(r => r.ok).catch(() => false);
+          const saudavel = API_URL
+            ? await fetch(`${API_URL}/health`, {
+                signal: AbortSignal.timeout(500)
+              }).then(r => r.ok).catch(() => false)
+            : false;
 
           // 2. Só chama a API se o servidor estiver vivo
           let result = null;
