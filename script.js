@@ -2850,6 +2850,18 @@ window.addEventListener('DOMContentLoaded', () => {
   const params = new URLSearchParams(window.location.search);
   const premiumStatus = params.get('premium');
 
+  if (premiumStatus === 'clear') {
+    localStorage.removeItem('nutricare_premium');
+    localStorage.removeItem('nutricare_premium_date');
+    window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
+    setTimeout(() => {
+      const loading = $c('loading-screen');
+      if (loading) loading.classList.add('hidden');
+      dispatch(null, null);
+    }, 500);
+    return;
+  }
+
   if (premiumStatus === 'success') {
     // Limpa URL sem recarregar
     window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
