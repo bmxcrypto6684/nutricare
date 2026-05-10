@@ -1,6 +1,6 @@
 {
   "name": "nutricare-server",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "NutriCare API - Backend de consulta nutricional",
   "main": "server.js",
@@ -9,11 +9,13 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "better-sqlite3": "^11.7.0",
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
     "express": "^4.21.0",
     "express-rate-limit": "^8.5.1",
     "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
     "stripe": "^22.1.1"
   }

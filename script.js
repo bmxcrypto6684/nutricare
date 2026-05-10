@@ -3,6 +3,85 @@
 // Arquitetura: UserInput → dispatch() → Engine(state,data) → JSON Response → Renderer(DOM)
 // ============================================================
 
+// ---- Crypto utilitário (Web Crypto API) ----
+async function hashSHA256(texto) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(texto);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function getChaveAssinatura() {
+  let chave = localStorage.getItem('nutricare_sign_key');
+  if (!chave) {
+    chave = Array.from({ length: 32 }, () =>
+      Math.random().toString(36).charAt(2)
+    ).join('');
+    localStorage.setItem('nutricare_sign_key', chave);
+  }
+  return chave;
+}
+
+async function assinarHMAC(dados) {
+  const chave = getChaveAssinatura();
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', encoder.encode(chave),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false, ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(dados));
+  const sigArray = Array.from(new Uint8Array(signature));
+  return sigArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function dadosAssinados(valor, dataISO) {
+  const payload = JSON.stringify({ v: valor, d: dataISO, t: Date.now() });
+  const sig = await assinarHMAC(payload);
+  return JSON.stringify({ p: payload, s: sig });
+}
+
+async function verificarDadosAssinados(raw) {
+  try {
+    const { p: payload, s: signature } = JSON.parse(raw);
+    const sigEsperada = await assinarHMAC(payload);
+    if (signature !== sigEsperada) return null;
+    return JSON.parse(payload);
+  } catch (e) { return null; }
+}
+
+// ---- PIN com hash SHA-256 (previne exposição em texto puro) ----
+async function hashPinSHA256(pin) {
+  const salt = getChaveAssinatura();
+  return hashSHA256(pin + ':' + salt);
+}
+
+// ---- Assinatura síncrona para premium (previne tampering casual via DevTools) ----
+function getVerifyChallenge() {
+  let c = localStorage.getItem('nutricare_verify_challenge');
+  if (!c) {
+    c = Array.from({ length: 32 }, () => Math.random().toString(36).charAt(2)).join('');
+    localStorage.setItem('nutricare_verify_challenge', c);
+  }
+  return c;
+}
+
+function provarPremium(dataISO) {
+  const c = getVerifyChallenge();
+  let h = 0;
+  const s = c + ':' + dataISO;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) - h) + s.charCodeAt(i);
+    h = h | 0;
+  }
+  return Math.abs(h).toString(36);
+}
+
+function verificarPremium(dataISO, proof) {
+  return proof === provarPremium(dataISO);
+}
+
 // ---- Estado Global ----
 const STATE = {
   screen: 'onboarding',
@@ -151,25 +230,6 @@ function engine(action, payload) {
       if (action && action.startsWith('ans_')) {
         handleAnamneseAnswer(action, payload);
 
-        // Restrictions = Sim → ask detail (stay on same step)
-        if (action === 'ans_restr_yes') {
-          STATE.anamneseStep = step;
-          return {
-            screen: 'anamnese_step',
-            message: '<strong>Qual(is) restrição(ões)?</strong>',
-            components: [{ type: 'text_input', placeholder: 'Ex: lactose, glúten...', action: 'ans_restr_detail' }],
-            actions: [{ id: 'ans_restr_detail', next: 'anamnese_step' }]
-          };
-        }
-
-        // Restriction detail submitted
-        if (action === 'ans_restr_detail') {
-          STATE.profile.restrictionDetail = payload || '';
-          STATE.anamneseStep++;
-          if (STATE.anamneseStep >= ANAMNESE_TOTAL_STEPS) { return transitionToAnalise(); }
-          return showAnamneseQuestion(STATE.anamneseStep);
-        }
-
         // Exams = yes → file upload (stay on same step)
         if (action === 'ans_exams_yes') {
           STATE.anamneseStep = step;
@@ -278,10 +338,10 @@ function engine(action, payload) {
         // Step 1: Goal feedback
         () => ({
           msg: goal.includes('perder') || goal.includes('emagrec') || goal === 'Emagrecimento'
-            ? `🔥 Seu objetivo é <strong>${goal}</strong>. Uma dica importante: combine déficit calórico moderado com aumento de proteínas para preservar massa magra. Vou considerar isso no seu plano!`
+            ? `🔥 Seu objetivo é <strong>${escapeHtml(goal)}</strong>. Uma dica importante: combine déficit calórico moderado com aumento de proteínas para preservar massa magra. Vou considerar isso no seu plano!`
             : goal.includes('massa') || goal.includes('muscular')
-            ? `💪 Foco em <strong>${goal}</strong>! Vou priorizar proteínas magras e carboidratos complexos nas refeições pós-treino.`
-            : `🌿 <strong>${goal}</strong> é uma excelente meta! Vou montar um plano equilibrado que se encaixa no seu dia a dia.`,
+            ? `💪 Foco em <strong>${escapeHtml(goal)}</strong>! Vou priorizar proteínas magras e carboidratos complexos nas refeições pós-treino.`
+            : `🌿 <strong>${escapeHtml(goal)}</strong> é uma excelente meta! Vou montar um plano equilibrado que se encaixa no seu dia a dia.`,
           btns: [{ text: 'Entendi! ✅', action: 'chat_continue_1' }]
         }),
         // Step 2: Personal tip based on profile
@@ -290,9 +350,9 @@ function engine(action, payload) {
           if (activity === 'Sedentário') {
             tip = '🚶 Você está sedentário. Que tal começar com <strong>caminhadas leves de 20 min</strong> após o almoço? Já ajuda na digestão e no metabolismo.';
           } else if (activity === 'Intenso') {
-            tip = `⚡ Atividade <strong>${activity}</strong>! Vou incluir carboidratos de qualidade pra te dar energia nos treinos.`;
+            tip = `⚡ Atividade <strong>${escapeHtml(activity)}</strong>! Vou incluir carboidratos de qualidade pra te dar energia nos treinos.`;
           } else {
-            tip = `🏃 Atividade <strong>${activity}</strong> é ótimo! Vou ajustar as porções pra matched seu gasto calórico.`;
+            tip = `🏃 Atividade <strong>${escapeHtml(activity)}</strong> é ótimo! Vou ajustar as porções pra matched seu gasto calórico.`;
           }
           return { msg: tip, btns: [{ text: 'Boa dica! 💡', action: 'chat_continue_2' }] };
         },
@@ -311,10 +371,10 @@ function engine(action, payload) {
         // Step 4: Diet + cooking + water summary
         () => ({
           msg: `🥗 <strong>Resumo das suas preferências:</strong><br><br>
-          • Dieta: <strong>${dietPref || 'Equilibrada'}</strong><br>
-          • Cozinha: <strong>${cookingStyle || 'Sim'}</strong><br>
-          • Água: <strong>${waterIntake || '—'}</strong><br>
-          ${favFoods ? `• Ama: <strong>${favFoods}</strong>` : ''}<br><br>
+          • Dieta: <strong>${escapeHtml(dietPref || 'Equilibrada')}</strong><br>
+          • Cozinha: <strong>${escapeHtml(cookingStyle || 'Sim')}</strong><br>
+          • Água: <strong>${escapeHtml(waterIntake || '—')}</strong><br>
+          ${favFoods ? `• Ama: <strong>${escapeHtml(favFoods)}</strong>` : ''}<br><br>
           ${waterIntake === 'Menos de 1L' ? '💧 Dica: tente aumentar para pelo menos 2L de água por dia. Seu metabolismo agradece!' : '💧 Hidratação em dia! Isso faz diferença nos resultados.'}`,
           btns: [{ text: 'Perfeito! ✅', action: 'chat_continue_4' }]
         }),
@@ -612,9 +672,16 @@ function showAnamneseQuestion(step) {
         { text: 'Saúde / metabolismo', action: 'ans_goal_health' },
         { text: 'Bem-estar geral', action: 'ans_goal_wellness' }
     ]},
-    { msg: `Possui <strong>restrições alimentares</strong>?`, type: 'options', key: 'restrictions', items: [
-        { text: 'Não', action: 'ans_restr_no' },
-        { text: 'Sim', action: 'ans_restr_yes' }
+    { msg: `Você tem <strong>comorbidades</strong>? (opcional)`, type: 'checkboxes', key: 'restrictionDetail', action: 'ans_comorbidades', items: [
+        { text: 'Diabetes', value: 'Diabetes' },
+        { text: 'Hipertensão', value: 'Hipertensão' },
+        { text: 'Colesterol alto', value: 'Colesterol alto' },
+        { text: 'Obesidade', value: 'Obesidade' },
+        { text: 'Doença celíaca', value: 'Doença celíaca' },
+        { text: 'Intolerância à lactose', value: 'Intolerância à lactose' },
+        { text: 'Gastrite / refluxo', value: 'Gastrite/refluxo' },
+        { text: 'Hipotireoidismo', value: 'Hipotireoidismo' },
+        { text: 'Nenhuma', value: '__none__', exclusive: true }
     ]},
     { msg: `Nível de <strong>atividade física</strong>?`, type: 'options', key: 'activity', items: [
         { text: 'Sedentário', action: 'ans_act_sed' },
@@ -659,7 +726,10 @@ function handleAnamneseAnswer(action, payload) {
     'ans_act_mod': ['activity', 'Moderado'],
     'ans_act_int': ['activity', 'Intenso'],
     'ans_restr_no': ['restrictions', []],
-    'ans_restr_yes': ['restrictions', ['Sim']],
+    'ans_comorbidades': (key, payload) => {
+      STATE.profile.restrictionDetail = payload;
+      STATE.profile.restrictions = payload ? ['Sim'] : [];
+    },
     'ans_exams_no': ['hasExams', false],
     'ans_exams_yes': ['hasExams', true],
     'ans_exams_done': ['hasExams', true],
@@ -669,8 +739,12 @@ function handleAnamneseAnswer(action, payload) {
   };
 
   if (map[action]) {
-    const [key, val] = map[action];
-    STATE.profile[key] = val;
+    if (typeof map[action] === 'function') {
+      map[action](action, payload);
+    } else {
+      const [key, val] = map[action];
+      STATE.profile[key] = val;
+    }
   }
 
   if (action && action.startsWith('ans_text_')) {
@@ -1324,9 +1398,23 @@ function carregarHistorico() {
   catch { return []; }
 }
 
+function removerRegistroHistorico(id) {
+  let historico = carregarHistorico();
+  historico = historico.filter(h => String(h.id) !== String(id));
+  localStorage.setItem(STORAGE_KEY_HISTORICO, JSON.stringify(historico));
+  renderHistorico();
+}
+
 function carregarProgresso() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY_PROGRESSO) || '[]'); }
   catch { return []; }
+}
+
+function removerRegistroProgresso(timestamp) {
+  let progresso = carregarProgresso();
+  progresso = progresso.filter(p => p.data !== timestamp);
+  localStorage.setItem(STORAGE_KEY_PROGRESSO, JSON.stringify(progresso));
+  renderProgresso();
 }
 
 function renderHistorico() {
@@ -1334,6 +1422,7 @@ function renderHistorico() {
   const cards = historico.length
     ? historico.map(h => `
       <div class="historico-card" onclick="dispatch('ver_consulta', '${h.id}')">
+        <button onclick="event.stopPropagation();removerRegistroHistorico('${h.id}')" class="historico-delete" title="Apagar registro">&times;</button>
         <div class="historico-card-top">
           <span class="historico-data">${h.data}</span>
           <span class="historico-objetivo">${escapeHtml(h.profile.goal || '')}</span>
@@ -1388,8 +1477,11 @@ function renderProgresso() {
             ${progresso.slice().reverse().map(p => `
               <div class="progresso-row">
                 <span>${new Date(p.data).toLocaleDateString('pt-BR')}</span>
-                <span><strong>${p.peso} kg</strong></span>
-                <span style="color:var(--text-tertiary);font-size:0.85rem;">${p.objetivo ? escapeHtml(p.objetivo) : ''}</span>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <span><strong>${p.peso} kg</strong></span>
+                  <span style="color:var(--text-tertiary);font-size:0.85rem;">${p.objetivo ? escapeHtml(p.objetivo) : ''}</span>
+                  <button onclick="removerRegistroProgresso('${p.data}')" style="background:none;border:none;color:var(--text-tertiary);cursor:pointer;padding:2px 6px;font-size:1.1rem;line-height:1;border-radius:4px;" title="Remover registro">&times;</button>
+                </div>
               </div>
             `).join('')}
           </div>`
@@ -1586,8 +1678,9 @@ function iniciarCheckoutPremium() {
 function verificarPremiumSucesso() {
   const jaEraPremium = localStorage.getItem('nutricare_premium') === 'true';
   if (!jaEraPremium) {
-    localStorage.setItem('nutricare_premium', 'true');
-    localStorage.setItem('nutricare_premium_date', new Date().toISOString());
+    const agora = new Date().toISOString();
+    salvarPremiumMultiStorage(agora);
+    salvarEverPaid(agora);
   }
   return true;
 }
@@ -1613,8 +1706,107 @@ function renderPremiumAtivado(email) {
 }
 
 // ---- Premium Feature Gates ----
+function getPremiumCookie() {
+  const match = document.cookie.match(/(?:^|;\s*)nutricare_premium=([^;]*)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function setPremiumCookie(value, dias) {
+  const expires = new Date(Date.now() + dias * 24 * 60 * 60 * 1000).toUTCString();
+  document.cookie = `nutricare_premium=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+}
+
+function setEverPaidCookie(value, dias) {
+  const expires = new Date(Date.now() + dias * 24 * 60 * 60 * 1000).toUTCString();
+  document.cookie = `nutricare_ever_paid=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+}
+
+function deletePremiumCookie() {
+  document.cookie = 'nutricare_premium=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Lax';
+}
+
+function getPremiumDeviceId() {
+  let id = localStorage.getItem('nutricare_device_id');
+  if (!id) {
+    id = 'dev_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+    localStorage.setItem('nutricare_device_id', id);
+  }
+  return id;
+}
+
+// Salva sessão premium ATIVA com assinatura criptográfica
+function salvarPremiumMultiStorage(dataAtivacaoISO) {
+  const proof = provarPremium(dataAtivacaoISO);
+  localStorage.setItem('nutricare_premium', 'true');
+  localStorage.setItem('nutricare_premium_date', dataAtivacaoISO);
+  localStorage.setItem('nutricare_premium_proof', proof);
+  const payload = JSON.stringify({ date: dataAtivacaoISO, device: getPremiumDeviceId(), proof });
+  setPremiumCookie(payload, 365);
+}
+
+// Salva registro PERMANENTE com assinatura
+function salvarEverPaid(dataAtivacaoISO) {
+  const proof = provarPremium(dataAtivacaoISO);
+  localStorage.setItem('nutricare_ever_paid', 'true');
+  localStorage.setItem('nutricare_ever_paid_date', dataAtivacaoISO);
+  localStorage.setItem('nutricare_ever_paid_proof', proof);
+  const payload = JSON.stringify({ date: dataAtivacaoISO, device: getPremiumDeviceId(), proof });
+  setEverPaidCookie(payload, 365 * 5);
+}
+
+function temEverPaid() {
+  // Verifica localStorage com proof
+  if (localStorage.getItem('nutricare_ever_paid') === 'true') {
+    const dataStr = localStorage.getItem('nutricare_ever_paid_date');
+    const proof = localStorage.getItem('nutricare_ever_paid_proof');
+    if (dataStr && proof && verificarPremium(dataStr, proof)) return true;
+  }
+  // Verifica cookie
+  const match = document.cookie.match(/(?:^|;\s*)nutricare_ever_paid=([^;]*)/);
+  if (match) {
+    try {
+      const data = JSON.parse(decodeURIComponent(match[1]));
+      if (data && data.date && data.proof && verificarPremium(data.date, data.proof)) {
+        localStorage.setItem('nutricare_ever_paid', 'true');
+        localStorage.setItem('nutricare_ever_paid_date', data.date);
+        localStorage.setItem('nutricare_ever_paid_proof', data.proof);
+        return true;
+      }
+    } catch (e) {}
+  }
+  return false;
+}
+
+function limparPremiumMultiStorage() {
+  localStorage.removeItem('nutricare_premium');
+  localStorage.removeItem('nutricare_premium_date');
+  localStorage.removeItem('nutricare_premium_proof');
+  deletePremiumCookie();
+}
+
+function recuperarPremiumCookie() {
+  const raw = getPremiumCookie();
+  if (!raw) return false;
+  try {
+    const data = JSON.parse(raw);
+    if (data && data.date && data.proof && verificarPremium(data.date, data.proof)) {
+      localStorage.setItem('nutricare_premium', 'true');
+      localStorage.setItem('nutricare_premium_date', data.date);
+      localStorage.setItem('nutricare_premium_proof', data.proof);
+      if (data.device) localStorage.setItem('nutricare_device_id', data.device);
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
 function getPremiumDiasRestantes() {
-  const dataStr = localStorage.getItem('nutricare_premium_date');
+  let dataStr = localStorage.getItem('nutricare_premium_date');
+  if (!dataStr) {
+    if (recuperarPremiumCookie()) {
+      dataStr = localStorage.getItem('nutricare_premium_date');
+    }
+  }
   if (!dataStr) return 0;
   const dataAtivacao = new Date(dataStr);
   const agora = new Date();
@@ -1623,15 +1815,45 @@ function getPremiumDiasRestantes() {
   return Math.max(0, 30 - diffDias);
 }
 
+function getEverPaidDiasRestantes() {
+  const dataStr = localStorage.getItem('nutricare_ever_paid_date');
+  if (!dataStr) return 0;
+  const dataAtivacao = new Date(dataStr);
+  const agora = new Date();
+  const diffMs = agora - dataAtivacao;
+  const diffDias = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  // ever_paid vale 5 anos (registro permanente)
+  return Math.max(0, 1825 - diffDias);
+}
+
+function reativarPremiumDoEverPaid() {
+  const dataStr = localStorage.getItem('nutricare_ever_paid_date');
+  if (!dataStr) return false;
+  // Reativa premium usando a data original
+  salvarPremiumMultiStorage(dataStr);
+  return true;
+}
+
 function isPremium() {
-  const val = localStorage.getItem('nutricare_premium');
+  let val = localStorage.getItem('nutricare_premium');
+  if (val !== 'true') {
+    if (recuperarPremiumCookie()) {
+      val = 'true';
+    }
+  }
   if (val !== 'true') return false;
+
+  // Verifica assinatura criptográfica (previne tampering via DevTools)
+  const dataStr = localStorage.getItem('nutricare_premium_date');
+  const proof = localStorage.getItem('nutricare_premium_proof');
+  if (!dataStr || !proof || !verificarPremium(dataStr, proof)) {
+    limparPremiumMultiStorage();
+    return false;
+  }
 
   const diasRestantes = getPremiumDiasRestantes();
   if (diasRestantes <= 0) {
-    // Premium expirado — limpa automaticamente
-    localStorage.removeItem('nutricare_premium');
-    localStorage.removeItem('nutricare_premium_date');
+    limparPremiumMultiStorage(); // Só limpa sessão, ever_paid continua
     return false;
   }
   return true;
@@ -1656,19 +1878,29 @@ function upgradeRedirect() {
 
 // ---- Modal Liberar Premium (simplificado) ----
 function exibirModalLiberarCliente() {
+  // Se não tem PIN configurado, mostra tela de cadastro
+  if (!getPinProfissional()) {
+    exibirModalConfigurarPin();
+    return;
+  }
+
   const overlay = document.createElement('div');
   overlay.id = 'modal-liberar-cliente';
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <div class="premium-modal">
       <button class="premium-modal-close" onclick="fecharModal()">&times;</button>
-      <div class="premium-modal-icon">⭐</div>
+      <div class="premium-modal-icon">🔐</div>
       <h2 class="premium-modal-title">Liberar Premium</h2>
       <p class="premium-modal-sub">Ative o plano Premium para seu cliente</p>
       <div class="premium-modal-body">
         <label class="premium-modal-label">Nome do Cliente</label>
         <input class="premium-modal-input" id="mc-nome" type="text" placeholder="Ex: Maria Silva" />
         <span class="premium-modal-helper">Deixe em branco para "Cliente"</span>
+
+        <label class="premium-modal-label" style="margin-top:12px;">PIN de Segurança</label>
+        <input class="premium-modal-input" id="mc-pin" type="password" placeholder="Digite seu PIN profissional" maxlength="6" inputmode="numeric" autocomplete="off" />
+        <span class="premium-modal-helper" id="mc-pin-erro" style="color:#EF4444;display:none;">PIN incorreto. Tente novamente.</span>
 
         <button class="premium-modal-btn" id="mc-confirmar-btn" onclick="confirmarLiberacao()">
           <span class="btn-icon">⭐</span>
@@ -1679,31 +1911,160 @@ function exibirModalLiberarCliente() {
     </div>`;
   document.body.appendChild(overlay);
   requestAnimationFrame(() => overlay.classList.add('modal-open'));
+  setTimeout(() => {
+    const pinInput = document.getElementById('mc-pin');
+    if (pinInput) pinInput.focus();
+  }, 300);
+  setTimeout(() => {
+    const pinInput = document.getElementById('mc-pin');
+    if (pinInput) pinInput.addEventListener('keydown', e => { if (e.key === 'Enter') confirmarLiberacao(); });
+  }, 300);
+}
 
-  // Valor fixo 30 dias — sem seleção de tempo
+function exibirModalConfigurarPin() {
+  const overlay = document.createElement('div');
+  overlay.id = 'modal-liberar-cliente';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="premium-modal">
+      <button class="premium-modal-close" onclick="fecharModal()">&times;</button>
+      <div class="premium-modal-icon">🔑</div>
+      <h2 class="premium-modal-title">Configurar PIN</h2>
+      <p class="premium-modal-sub">Crie um PIN de segurança para liberar o Premium dos seus clientes.</p>
+      <div class="premium-modal-body">
+        <label class="premium-modal-label">Crie seu PIN (4 a 6 dígitos)</label>
+        <input class="premium-modal-input" id="mc-novo-pin" type="password" placeholder="Ex: 1234" maxlength="6" inputmode="numeric" autocomplete="off" />
+        <span class="premium-modal-helper">Use apenas números</span>
+
+        <label class="premium-modal-label" style="margin-top:12px;">Confirme o PIN</label>
+        <input class="premium-modal-input" id="mc-confirmar-pin" type="password" placeholder="Repita o PIN" maxlength="6" inputmode="numeric" autocomplete="off" />
+        <span class="premium-modal-helper" id="mc-pin-setup-erro" style="color:#EF4444;display:none;"></span>
+
+        <button class="premium-modal-btn" id="mc-confirmar-btn" onclick="salvarPinConfigurado()">
+          <span class="btn-text">Salvar PIN</span>
+          <span class="spinner"></span>
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add('modal-open'));
+  setTimeout(() => {
+    const input = document.getElementById('mc-novo-pin');
+    if (input) input.focus();
+  }, 300);
+  setTimeout(() => {
+    const input = document.getElementById('mc-novo-pin');
+    if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') salvarPinConfigurado(); });
+    const input2 = document.getElementById('mc-confirmar-pin');
+    if (input2) input2.addEventListener('keydown', e => { if (e.key === 'Enter') salvarPinConfigurado(); });
+  }, 300);
+}
+
+async function salvarPinConfigurado() {
+  const btn = document.getElementById('mc-confirmar-btn');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.classList.add('loading');
+
+  const pin = document.getElementById('mc-novo-pin').value.trim();
+  const confirmar = document.getElementById('mc-confirmar-pin').value.trim();
+  const erroEl = document.getElementById('mc-pin-setup-erro');
+
+  if (pin.length < 4 || pin.length > 6 || !/^\d+$/.test(pin)) {
+    erroEl.textContent = 'O PIN deve ter 4 a 6 dígitos numéricos.';
+    erroEl.style.display = 'block';
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    return;
+  }
+  if (pin !== confirmar) {
+    erroEl.textContent = 'Os PINs não conferem. Digite igual nos dois campos.';
+    erroEl.style.display = 'block';
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    return;
+  }
+
+  // Armazena hash SHA-256 + salt, nunca o PIN em texto puro
+  const hash = await hashPinSHA256(pin);
+  localStorage.setItem('nutricare_pin_hash', hash);
+  erroEl.style.display = 'none';
+  fecharModal();
+  setTimeout(() => exibirModalLiberarCliente(), 350);
+}
+
+function getPinProfissional() {
+  const hash = localStorage.getItem('nutricare_pin_hash');
+  if (hash) return hash;
+  // Migração: PIN antigo em texto puro
+  const oldPin = localStorage.getItem('nutricare_pin');
+  if (oldPin) return oldPin;
+  return '';
 }
 
 function fecharModal() {
   const overlay = document.getElementById('modal-liberar-cliente');
   if (overlay) {
     overlay.classList.remove('modal-open');
-    overlay.addEventListener('transitionend', () => overlay.remove(), { once: true });
     setTimeout(() => { if (overlay.parentNode) overlay.remove(); }, 300);
   }
 }
 
-function confirmarLiberacao() {
+async function confirmarLiberacao() {
   const btn = document.getElementById('mc-confirmar-btn');
+  if (btn.disabled) return;
+  btn.disabled = true;
   btn.classList.add('loading');
+
+  // Rate limiting: 5 tentativas, lock de 30s
+  window._pinAttempts = (window._pinAttempts || 0);
+  if (window._pinAttempts >= 5) {
+    const pinErro = document.getElementById('mc-pin-erro');
+    pinErro.textContent = '🔒 Muitas tentativas. Aguarde 30 segundos.';
+    pinErro.style.display = 'block';
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    setTimeout(() => { window._pinAttempts = 0; }, 30000);
+    return;
+  }
+
+  // Verifica PIN (hash SHA-256 ou fallback para PIN antigo)
+  const pinDigitado = document.getElementById('mc-pin').value.trim();
+  const pinErro = document.getElementById('mc-pin-erro');
+  const pinHash = getPinProfissional();
+
+  if (!pinHash) {
+    pinErro.textContent = 'Nenhum PIN configurado. Configure primeiro.';
+    pinErro.style.display = 'block';
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    return;
+  }
+
+  const hashDigitado = await hashPinSHA256(pinDigitado);
+  const pinValido = hashDigitado === pinHash ||
+    (/^\d{4,6}$/.test(pinHash) && pinDigitado === pinHash);
+
+  if (!pinValido) {
+    window._pinAttempts++;
+    pinErro.textContent = `PIN incorreto. Tentativa ${window._pinAttempts}/5.`;
+    pinErro.style.display = 'block';
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    document.getElementById('mc-pin').focus();
+    return;
+  }
+  pinErro.style.display = 'none';
+  window._pinAttempts = 0; // Reseta contador no sucesso
 
   const nome = document.getElementById('mc-nome').value.trim() || 'Cliente';
   const tempo = 30;
   const dataAtivacao = new Date();
   const dataExpiracao = new Date(dataAtivacao.getTime() + tempo * 24 * 60 * 60 * 1000);
 
-  // Ativa premium
-  localStorage.setItem('nutricare_premium', 'true');
-  localStorage.setItem('nutricare_premium_date', dataAtivacao.toISOString());
+  // Ativa premium (localStorage + cookie)
+  salvarPremiumMultiStorage(dataAtivacao.toISOString());
+  salvarEverPaid(dataAtivacao.toISOString());
 
   // Salva dados do cliente
   const liberacao = {
@@ -1818,6 +2179,9 @@ function renderChatPremium(resp) {
 }
 
 function dispatch(action, payload) {
+  // Guard anti-clique duplicado
+  if (STATE._dispatching) { console.warn('⏳ [NutriCare] Dispatch bloqueado — já processando'); return; }
+  STATE._dispatching = true;
   console.log(`🔄 [NutriCare] Action: ${action}`, payload ? `Payload: ${payload.slice(0, 50)}...` : '');
 
   // Aplica transição de tela baseada na ação
@@ -1834,16 +2198,17 @@ function dispatch(action, payload) {
     } else {
       exibirModalLiberarCliente();
     }
+    STATE._dispatching = false;
     return;
   }
 
   // Sair do premium — limpa e volta pro básico
   if (action === 'sair_premium') {
-    localStorage.removeItem('nutricare_premium');
-    localStorage.removeItem('nutricare_premium_date');
+    limparPremiumMultiStorage();
     resetState();
     const response = engine(action, payload);
     render(response);
+    STATE._dispatching = false;
     return;
   }
 
@@ -1868,9 +2233,9 @@ function dispatch(action, payload) {
     STATE.lastUserInput = payload.trim();
   }
   const response = engine(action, payload);
-  // Atualiza STATE.screen com a tela retornada pelo engine (essencial para transições internas)
   STATE.screen = response.screen;
   render(response);
+  STATE._dispatching = false;
 }
 
 function renderUserBubble() {
@@ -1902,6 +2267,9 @@ function render(response) {
   const container = $c('screen-container');
   if (!container) return;
 
+  // Cleanup ao trocar de tela
+  if (STATE._loaderInterval) { clearInterval(STATE._loaderInterval); STATE._loaderInterval = null; }
+
   STATE.screen = response.screen;
 
   // Use dedicated template for each screen type
@@ -1927,6 +2295,14 @@ function render(response) {
       if (isPremium()) {
         const dias = getPremiumDiasRestantes();
         alert(`⭐ Você já possui Premium ativo!\n⏳ ${dias} dias restantes.`);
+        return;
+      }
+      // Cliente já pagou antes? Reativa sem cobrar de novo
+      if (temEverPaid()) {
+        reativarPremiumDoEverPaid();
+        const dias = getPremiumDiasRestantes();
+        alert(`♻️ Premium reativado!\n⏳ ${dias} dias restantes (você já havia pago antes).`);
+        dispatch(null, null);
         return;
       }
       iniciarCheckoutPremium();
@@ -2153,16 +2529,28 @@ function renderComponent(comp, screen) {
           <button class="option-btn" data-action="${i.action}">${i.text}</button>`).join('')}
       </div>`;
 
-    case 'text_input':
+    case 'checkboxes':
+      return `<div class="checkboxes-container" style="padding:8px 0;">
+        ${comp.items.map(i => `
+          <label class="checkbox-item" data-value="${i.value}"${i.exclusive ? ' data-exclusive="true"' : ''}>
+            <span class="checkbox-box"></span>
+            <span class="checkbox-label">${i.text}</span>
+          </label>`).join('')}
+        <button class="btn-primary" data-action="${comp.action}" style="margin-top:12px;width:100%;">Continuar</button>
+      </div>`;
+
+    case 'text_input': {
+      const isNumeric = comp.action === 'ans_text_weight' || comp.action === 'ans_text_height';
       return `
         <div class="input-text-wrapper" style="display:flex;gap:8px;padding:8px 0;">
           <input type="text" class="text-input" id="dynamic-text-input"
             placeholder="${comp.placeholder || 'Digite...'}"
-            autocomplete="off">
+            autocomplete="off"${isNumeric ? ' inputmode="decimal" pattern="[0-9,.]*"' : ''}>
           <button class="send-btn" id="dynamic-send-btn" data-action="${comp.action}" disabled>
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M4 10H16M16 10L11 5M16 10L11 15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           </button>
         </div>`;
+    }
 
     case 'file_upload':
       return `
@@ -2364,12 +2752,13 @@ function renderHowItWorks(resp) {
 function renderPlans(resp) {
   const comps = resp.components.reduce((acc, c) => { acc[c.type] = c; return acc; }, {});
   const pricing = comps.pricing;
+  STATE.lastUserInput = null;
   return `
     <div class="screen" id="screen-planos">
       <div class="plans-container">
-        ${renderUserBubble()}
         ${comps.back ? `<button class="back-btn" data-action="${comps.back.action}"><svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M12 16L6 10L12 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> Voltar</button>` : ''}
-        ${comps.title ? `<h2>${comps.title.text}</h2><p class="how-subtitle">Escolha a opção ideal para sua jornada nutricional.</p>` : ''}
+        <div class="plans-welcome">Seja bem vindo</div>
+        ${comps.title ? `<h2>${comps.title.text}</h2><p class="how-subtitle">${comps.title.subtitle}</p>` : ''}
         ${pricing ? `
           <div class="plans-grid">
             ${pricing.items.map(p => `
@@ -2433,9 +2822,14 @@ function startLoaderAnimation() {
   ];
   const el = document.getElementById('loader-status');
   if (!el) return;
+  if (STATE._loaderInterval) { clearInterval(STATE._loaderInterval); }
   let i = 0;
-  el._interval = setInterval(function() {
+  STATE._loaderInterval = setInterval(function() {
     if (i < messages.length) el.textContent = messages[i];
+    else {
+      clearInterval(STATE._loaderInterval);
+      STATE._loaderInterval = null;
+    }
     i++;
   }, 700);
 }
@@ -2846,9 +3240,20 @@ function bindClicks(container) {
   const sendBtn = container.querySelector('#dynamic-send-btn');
   if (textInput && sendBtn) {
     const action = sendBtn.dataset.action;
+    const isNumericField = action === 'ans_text_weight' || action === 'ans_text_height';
+    const isNumeroValido = (v) => /^\d+([.,]\d+)?$/.test(v);
     textInput.addEventListener('input', () => {
-      sendBtn.disabled = textInput.value.trim().length < 3;
-      textInput.style.borderColor = textInput.value.trim().length >= 3 ? 'var(--accent-500)' : '';
+      let val = textInput.value.trim();
+      if (isNumericField) {
+        // Filtra caracteres não numéricos (mantém vírgula e ponto)
+        textInput.value = val.replace(/[^0-9,.]/g, '');
+        val = textInput.value.trim();
+        sendBtn.disabled = !isNumeroValido(val) || val.length < 2;
+        textInput.style.borderColor = isNumeroValido(val) && val.length >= 2 ? 'var(--accent-500)' : '';
+      } else {
+        sendBtn.disabled = val.length < 3;
+        textInput.style.borderColor = val.length >= 3 ? 'var(--accent-500)' : '';
+      }
     });
     const mostrarErro = (msg) => {
       textInput.style.borderColor = '#EF4444';
@@ -2867,14 +3272,57 @@ function bindClicks(container) {
       }, 2000);
     };
     const submit = () => {
-      const val = textInput.value.trim();
+      let val = textInput.value.trim();
       if (!val) { mostrarErro('⚠️ Preencha este campo antes de continuar'); return; }
-      if (val.length < 3) { mostrarErro('⚠️ Digite pelo menos 3 caracteres'); return; }
+      if (isNumericField) {
+        if (!isNumeroValido(val)) {
+          mostrarErro(action === 'ans_text_weight' ? '⚠️ Digite apenas números para o peso (ex: 70)' : '⚠️ Digite apenas números para a altura (ex: 170)');
+          return;
+        }
+        // Normaliza vírgula para ponto
+        val = val.replace(',', '.');
+      } else if (val.length < 3) {
+        mostrarErro('⚠️ Digite pelo menos 3 caracteres');
+        return;
+      }
       dispatch(action, val);
     };
     sendBtn.addEventListener('click', submit);
     textInput.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
     setTimeout(() => textInput.focus(), 200);
+  }
+
+  // Checkboxes
+  const checkboxContainer = container.querySelector('.checkboxes-container');
+  if (checkboxContainer) {
+    const items = checkboxContainer.querySelectorAll('.checkbox-item');
+    const continuarBtn = checkboxContainer.querySelector('.btn-primary');
+    items.forEach(item => {
+      item.addEventListener('click', () => {
+        const isExclusive = item.dataset.exclusive === 'true';
+        if (isExclusive) {
+          // "Nenhuma" → marca ela, desmarca todas as outras
+          items.forEach(i => i.classList.remove('checked'));
+          item.classList.add('checked');
+        } else {
+          // Outra opção → se "Nenhuma" estiver marcada, desmarca
+          const noneItem = checkboxContainer.querySelector('[data-exclusive="true"]');
+          if (noneItem) noneItem.classList.remove('checked');
+          item.classList.toggle('checked');
+        }
+      });
+    });
+    continuarBtn.addEventListener('click', () => {
+      const checked = Array.from(items).filter(i => i.classList.contains('checked'));
+      const hasNone = checked.some(i => i.dataset.exclusive === 'true');
+      if (hasNone || checked.length === 0) {
+        dispatch(continuarBtn.dataset.action, '');
+      } else {
+        const values = checked.map(i => i.dataset.value).join(', ');
+        STATE.lastUserInput = values;
+        dispatch(continuarBtn.dataset.action, values);
+      }
+    });
   }
 
   // File upload
@@ -3060,8 +3508,7 @@ window.addEventListener('DOMContentLoaded', () => {
   const premiumStatus = params.get('premium');
 
   if (premiumStatus === 'clear') {
-    localStorage.removeItem('nutricare_premium');
-    localStorage.removeItem('nutricare_premium_date');
+    limparPremiumMultiStorage();
     window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
     setTimeout(() => {
       const loading = $c('loading-screen');

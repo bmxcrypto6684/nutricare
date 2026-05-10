@@ -17,6 +17,20 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script>
+    // Força limpeza do Service Worker antigo pra não servir script.js em cache
+    if ('serviceWorker' in navigator && !sessionStorage.getItem('sw_cleaned')) {
+      sessionStorage.setItem('sw_cleaned', '1');
+      navigator.serviceWorker.getRegistrations().then(regs => {
+        if (regs.length > 0) {
+          Promise.all(regs.map(r => r.unregister())).then(() => {
+            localStorage.removeItem('nutricare_script_version');
+            window.location.reload();
+          });
+        }
+      });
+    }
+    </script>
 </head>
 <body>
     <div id="app">
@@ -46,6 +60,6 @@
         <div id="screen-container"></div>
 
     </div>
-    <script src="script.js?v=14"></script>
+    <script src="script.js?v=15"></script>
 </body>
 </html>

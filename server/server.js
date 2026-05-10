@@ -1,5 +1,5 @@
 // ============================================================
-// NutriCare API — Backend de Consulta Nutricional
+// NutriCare API — Backend de Consulta Nutricional v2
 // ============================================================
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const express = require('express');
@@ -8,28 +8,58 @@ const morgan = require('morgan');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
+const jwt = require('jsonwebtoken');
+const db = require('./db');
 
 // ---- Global Error Handlers (evita crash do servidor) ----
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('\n⚠️ UNHANDLED REJECTION:', reason?.message || reason);
-  console.error('   O servidor continua rodando normalmente.');
+process.on('unhandledRejection', (reason) => {
+  logger('ERROR', 'process', 'Unhandled Rejection', { message: reason?.message || String(reason) });
 });
 process.on('uncaughtException', (err) => {
-  console.error('\n⚠️ UNCAUGHT EXCEPTION:', err.message);
-  console.error('   O servidor continua rodando normalmente.');
+  logger('ERROR', 'process', 'Uncaught Exception', { message: err.message, stack: err.stack?.substring(0, 300) });
 });
 
+// ---- Structured Logger ----
+const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
+const CURRENT_LOG_LEVEL = LOG_LEVELS[process.env.LOG_LEVEL] || LOG_LEVELS.INFO;
+
+function logger(level, module, message, data) {
+  if (LOG_LEVELS[level] < CURRENT_LOG_LEVEL) return;
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level,
+    module,
+    message,
+    ...(data ? { data } : {})
+  };
+  if (level === 'ERROR') {
+    console.error(JSON.stringify(entry));
+  } else {
+    console.log(JSON.stringify(entry));
+  }
+}
+
+// ---- JWT Secret ----
+const JWT_SECRET = process.env.JWT_SECRET || (() => {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET must be set in production');
+  }
+  logger('WARN', 'jwt', 'Usando JWT_SECRET de desenvolvimento. Configure em produção!');
+  return 'dev-secret-do-not-use-in-production';
+})();
+
+// ---- Stripe ----
 let stripe;
 try {
   const StripeKey = process.env.STRIPE_SECRET_KEY;
   if (StripeKey && StripeKey !== 'sk_test_placeholder') {
     stripe = require('stripe')(StripeKey);
   } else {
-    console.warn('\n⚠️ STRIPE_SECRET_KEY não configurada. Pagamentos premium desabilitados.');
+    logger('WARN', 'stripe', 'STRIPE_SECRET_KEY não configurada. Pagamentos premium desabilitados.');
     stripe = null;
   }
 } catch (err) {
-  console.error('\n⚠️ Erro ao inicializar Stripe:', err.message);
+  logger('ERROR', 'stripe', 'Erro ao inicializar Stripe', { message: err.message });
   stripe = null;
 }
 
@@ -42,10 +72,13 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false
 }));
 
+// ---- Webhook: raw body parser (MUST be before express.json!) ----
+app.use('/api/stripe-webhook', express.raw({ type: 'application/json' }));
+
 // ---- Rate Limiting ----
 const apiLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minuto
-  max: 20, // máximo 20 requisições por minuto
+  windowMs: 60 * 1000,
+  max: 20,
   message: { success: false, error: 'Muitas requisições. Tente novamente em 1 minuto.' },
   standardHeaders: true,
   legacyHeaders: false
@@ -60,30 +93,25 @@ const CORS_ORIGINS = process.env.CORS_ORIGINS
       'https://johnnmacedo.github.io',
       'https://nutricare-api.onrender.com'
     ];
-app.use(cors({ origin: CORS_ORIGINS, methods: ['GET', 'POST'] }));
-app.use(express.json({ limit: '500kb' })); // reduzido de 10mb para 500kb
+app.use(cors({ origin: CORS_ORIGINS, methods: ['GET', 'POST', 'DELETE'] }));
+app.use(express.json({ limit: '500kb' }));
 app.use(morgan('\x1b[36m:method\x1b[0m :url \x1b[33m:status\x1b[0m \x1b[90m:response-time ms\x1b[0m'));
 
-// ---- Static Files (apenas arquivos públicos) ----
+// ---- Static Files ----
 app.use(express.static(path.join(__dirname, '..'), {
   dotfiles: 'ignore',
   index: 'index.html'
 }));
 
-// ---- Request Log Helper ----
+// ---- Request Log Helper (mantido para compatibilidade) ----
 function logRequest(title, data) {
-  const timestamp = new Date().toLocaleTimeString('pt-BR');
-  console.log(`\n╔══════════════════════════════════════════╗`);
-  console.log(`║  ${timestamp} — ${title}`);
-  console.log(`╚══════════════════════════════════════════╝`);
-  if (data) console.log(JSON.stringify(data, null, 2));
+  logger('INFO', 'request', title, data);
 }
 
 // ---- Validação de entrada ----
 function validarProfile(p) {
   const erros = [];
 
-  // peso: número positivo entre 20 e 500
   const peso = parseFloat(p.weight);
   if (p.weight !== undefined && p.weight !== '') {
     if (isNaN(peso) || peso < 20 || peso > 500) {
@@ -91,7 +119,6 @@ function validarProfile(p) {
     }
   }
 
-  // altura: número positivo entre 50 e 250
   const altura = parseFloat(p.height);
   if (p.height !== undefined && p.height !== '') {
     if (isNaN(altura) || altura < 50 || altura > 250) {
@@ -99,7 +126,6 @@ function validarProfile(p) {
     }
   }
 
-  // idade: número inteiro entre 10 e 120
   const idade = parseInt(p.age, 10);
   if (p.age !== undefined && p.age !== '') {
     if (isNaN(idade) || idade < 10 || idade > 120) {
@@ -107,12 +133,10 @@ function validarProfile(p) {
     }
   }
 
-  // gênero
   if (p.gender && !['Masculino', 'Feminino'].includes(p.gender)) {
     erros.push('Gênero deve ser Masculino ou Feminino');
   }
 
-  // objetivo
   if (p.goal && !p.goal.includes('Emagrecimento') && !p.goal.includes('massa muscular') && !p.goal.includes('Saúde') && !p.goal.includes('Bem-estar')) {
     erros.push('Objetivo inválido');
   }
@@ -127,9 +151,125 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'NutriCare API',
-    version: '1.0.0',
+    version: '2.0.0',
+    database: path.basename(process.env.DATABASE_PATH || 'nutricare.db'),
+    database_persistent: false, // disco efêmero no Render free
+    endpoints: {
+      consulta: 'POST /api/consulta',
+      checkout: 'POST /api/create-checkout-session',
+      verify_payment: 'GET /api/verify-payment',
+      webhook: 'POST /api/stripe-webhook',
+      claim_premium: 'POST /api/claim-premium',
+      verify_token: 'GET /api/verify-token',
+      consultations: 'GET /api/consultations',
+      delete_account: 'POST /api/account/delete'
+    },
     timestamp: new Date().toISOString()
   });
+});
+
+// ============================================================
+// Stripe Webhook (confirmação de pagamento)
+// ============================================================
+app.post('/api/stripe-webhook', async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
+    logger('WARN', 'webhook', 'STRIPE_WEBHOOK_SECRET não configurado');
+    return res.status(200).json({ received: true, note: 'webhook_secret_not_configured' });
+  }
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+  } catch (err) {
+    logger('ERROR', 'webhook', 'Falha na verificação da assinatura do webhook', { message: err.message });
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const deviceId = session.client_reference_id;
+    const email = session.customer_details?.email;
+
+    if (deviceId) {
+      try {
+        const user = db.findOrCreateUser(deviceId, email);
+        db.activatePremium(user.id, session.id);
+        logger('INFO', 'webhook', `Premium ativado para device ${deviceId}`, { userId: user.id });
+      } catch (err) {
+        logger('ERROR', 'webhook', 'Erro ao ativar premium no webhook', { message: err.message });
+      }
+    }
+  }
+
+  res.json({ received: true });
+});
+
+// ============================================================
+// POST /api/claim-premium — Frontend solicita token JWT
+// ============================================================
+app.post('/api/claim-premium', async (req, res) => {
+  const { deviceId, sessionId } = req.body;
+  if (!deviceId) {
+    return res.status(400).json({ success: false, error: 'deviceId é obrigatório' });
+  }
+
+  try {
+    let user = db.findOrCreateUser(deviceId);
+
+    // Se sessionId foi fornecido, verifica no Stripe
+    if (sessionId && stripe) {
+      try {
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        if (session.payment_status === 'paid') {
+          db.activatePremium(user.id, sessionId);
+          const email = session.customer_details?.email;
+          if (email && email !== user.email) {
+            user = db.findOrCreateUser(deviceId, email);
+          }
+        }
+      } catch (stripeErr) {
+        logger('WARN', 'claim-premium', 'Erro ao verificar sessão Stripe', { message: stripeErr.message });
+      }
+    }
+
+    const premium = db.isPremiumActive(user.id);
+    const token = premium ? jwt.sign(
+      { userId: user.id, deviceId, premium: true, iat: Math.floor(Date.now() / 1000) },
+      JWT_SECRET,
+      { expiresIn: '1h' }
+    ) : null;
+
+    res.json({
+      success: true,
+      premium,
+      token,
+      expiresAt: premium ? new Date(Date.now() + 30 * 86400000).toISOString() : null
+    });
+  } catch (err) {
+    logger('ERROR', 'claim-premium', 'Erro no servidor', { message: err.message });
+    res.status(500).json({ success: false, error: 'Erro no servidor' });
+  }
+});
+
+// ============================================================
+// GET /api/verify-token — Valida JWT ao carregar app
+// ============================================================
+app.get('/api/verify-token', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.json({ success: true, premium: false });
+  }
+
+  try {
+    const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+    const premium = db.isPremiumActive(decoded.userId);
+    res.json({ success: true, premium });
+  } catch (err) {
+    res.json({ success: true, premium: false });
+  }
 });
 
 // ============================================================
@@ -141,7 +281,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
       return res.status(503).json({ success: false, error: 'Pagamento indisponível no momento' });
     }
 
-    const { planType } = req.body;
+    const { planType, deviceId } = req.body;
 
     let priceData;
     if (planType === 'premium') {
@@ -159,14 +299,16 @@ app.post('/api/create-checkout-session', async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
+      client_reference_id: deviceId || 'unknown',
       line_items: [{ ...priceData, quantity: 1 }],
       success_url: `${process.env.BASE_URL || 'http://localhost:3000'}/?premium=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.BASE_URL || 'http://localhost:3000'}/?premium=cancel`,
     });
 
+    logger('INFO', 'checkout', `Sessão Stripe criada: ${session.id}`, { deviceId });
     res.json({ success: true, url: session.url, sessionId: session.id });
   } catch (err) {
-    console.error('\n❌ Erro ao criar checkout Stripe:', err.message);
+    logger('ERROR', 'checkout', 'Erro ao criar checkout', { message: err.message });
     if (!res.headersSent) {
       res.status(500).json({ success: false, error: 'Erro ao iniciar pagamento' });
     }
@@ -174,7 +316,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
 });
 
 // ============================================================
-// GET /api/verify-payment — Verifica status do pagamento
+// GET /api/verify-payment — Verifica status do pagamento + ativa premium
 // ============================================================
 app.get('/api/verify-payment', async (req, res) => {
   try {
@@ -182,13 +324,24 @@ app.get('/api/verify-payment', async (req, res) => {
       return res.json({ success: true, paid: false, status: 'stripe_indisponivel' });
     }
 
-    const { session_id } = req.query;
+    const { session_id, deviceId } = req.query;
     if (!session_id) {
       return res.status(400).json({ success: false, error: 'session_id é obrigatório' });
     }
 
     const session = await stripe.checkout.sessions.retrieve(session_id);
     const paid = session.payment_status === 'paid';
+
+    // Se pagou, ativa premium no banco
+    if (paid && deviceId) {
+      try {
+        const user = db.findOrCreateUser(deviceId, session.customer_details?.email || null);
+        db.activatePremium(user.id, session_id);
+        logger('INFO', 'verify-payment', `Premium ativado via verify-payment`, { userId: user.id });
+      } catch (dbErr) {
+        logger('ERROR', 'verify-payment', 'Erro ao ativar premium no DB', { message: dbErr.message });
+      }
+    }
 
     res.json({
       success: true,
@@ -197,10 +350,107 @@ app.get('/api/verify-payment', async (req, res) => {
       customer_email: session.customer_details?.email || null
     });
   } catch (err) {
-    console.error('\n❌ Erro ao verificar pagamento:', err.message);
+    logger('ERROR', 'verify-payment', 'Erro ao verificar pagamento', { message: err.message });
     if (!res.headersSent) {
       res.json({ success: true, paid: false, status: 'erro_verificacao' });
     }
+  }
+});
+
+// ============================================================
+// POST /api/consultations/save — Salva consulta no servidor
+// ============================================================
+app.post('/api/consultations/save', (req, res) => {
+  const { deviceId, profile, plan } = req.body;
+  if (!deviceId || !profile) {
+    return res.status(400).json({ success: false, error: 'deviceId e profile são obrigatórios' });
+  }
+  try {
+    const user = db.findOrCreateUser(deviceId);
+    db.saveConsultation(user.id, profile, plan || null);
+    res.json({ success: true });
+  } catch (err) {
+    logger('ERROR', 'save-consultation', 'Erro ao salvar consulta', { message: err.message });
+    res.status(500).json({ success: false, error: 'Erro ao salvar consulta' });
+  }
+});
+
+// ============================================================
+// GET /api/consultations — Lista consultas
+// ============================================================
+app.get('/api/consultations', (req, res) => {
+  const { deviceId } = req.query;
+  if (!deviceId) {
+    return res.status(400).json({ success: false, error: 'deviceId é obrigatório' });
+  }
+  try {
+    const user = db.findOrCreateUser(deviceId);
+    const data = db.getConsultations(user.id);
+    const total = db.getConsultationCount(user.id);
+    res.json({ success: true, data, total });
+  } catch (err) {
+    logger('ERROR', 'list-consultations', 'Erro ao listar consultas', { message: err.message });
+    res.status(500).json({ success: false, error: 'Erro ao listar consultas' });
+  }
+});
+
+// ============================================================
+// DELETE /api/consultations/:id — Remove consulta
+// ============================================================
+app.delete('/api/consultations/:id', (req, res) => {
+  const { deviceId } = req.body || {};
+  if (!deviceId) {
+    return res.status(400).json({ success: false, error: 'deviceId é obrigatório' });
+  }
+  try {
+    const user = db.findOrCreateUser(deviceId);
+    db.deleteConsultation(req.params.id, user.id);
+    res.json({ success: true });
+  } catch (err) {
+    logger('ERROR', 'delete-consultation', 'Erro ao remover consulta', { message: err.message });
+    res.status(500).json({ success: false, error: 'Erro ao remover consulta' });
+  }
+});
+
+// ============================================================
+// POST /api/account/delete — Exclui todos os dados do usuário (LGPD)
+// ============================================================
+app.post('/api/account/delete', (req, res) => {
+  const { deviceId, email } = req.body;
+  if (!deviceId && !email) {
+    return res.status(400).json({ success: false, error: 'deviceId ou email é obrigatório' });
+  }
+  try {
+    if (deviceId) {
+      const user = db.findOrCreateUser(deviceId);
+      db.deleteUserData(user.id);
+      logger('INFO', 'account-delete', `Dados excluídos para device ${deviceId}`);
+    } else if (email) {
+      const user = db.findUserByEmail(email);
+      if (user) {
+        db.deleteUserData(user.id);
+        logger('INFO', 'account-delete', `Dados excluídos para email ${email}`);
+      }
+    }
+    res.json({ success: true, message: 'Todos os dados foram excluídos' });
+  } catch (err) {
+    logger('ERROR', 'account-delete', 'Erro ao excluir dados', { message: err.message });
+    res.status(500).json({ success: false, error: 'Erro ao excluir dados' });
+  }
+});
+
+// ============================================================
+// Error Middleware
+// ============================================================
+app.use((err, req, res, next) => {
+  logger('ERROR', 'express', err.message, {
+    url: req.originalUrl,
+    method: req.method,
+    ip: req.ip,
+    stack: err.stack?.substring(0, 500)
+  });
+  if (!res.headersSent) {
+    res.status(500).json({ success: false, error: 'Erro interno do servidor' });
   }
 });
 
@@ -212,7 +462,6 @@ app.post('/api/consulta', (req, res) => {
 
   logRequest('Nova consulta recebida', profile);
 
-  // Validação básica
   if (!profile || Object.keys(profile || {}).length === 0) {
     return res.status(400).json({
       success: false,
@@ -220,7 +469,6 @@ app.post('/api/consulta', (req, res) => {
     });
   }
 
-  // Validação de campos
   const erros = validarProfile(profile);
   if (erros.length > 0) {
     return res.status(400).json({
@@ -233,22 +481,23 @@ app.post('/api/consulta', (req, res) => {
   try {
     const plano = gerarPlanoCompleto(profile);
 
-    console.log(`\n✅ Plano gerado para: ${profile.goal || 'perfil genérico'}`);
-    console.log(`   Refeições: ${plano.refeicoes.length}`);
-    console.log(`   Estratégias: ${plano.estrategias.length}`);
-    console.log(`   Suplementos: ${plano.suplementos.length}`);
+    logger('INFO', 'consulta', `Plano gerado para: ${profile.goal || 'perfil genérico'}`, {
+      refeicoes: plano.refeicoes.length,
+      estrategias: plano.estrategias.length,
+      suplementos: plano.suplementos.length
+    });
 
     res.json({
       success: true,
       data: plano,
       meta: {
         gerado_em: new Date().toISOString(),
-        versao_algoritmo: '1.0.0',
+        versao_algoritmo: '2.0.0',
         modo_ia_simulada: true
       }
     });
   } catch (err) {
-    console.error('\n❌ Erro ao gerar plano:', err.message);
+    logger('ERROR', 'consulta', 'Erro ao gerar plano', { message: err.message });
     res.status(500).json({
       success: false,
       error: 'Erro interno ao gerar plano nutricional'
@@ -575,14 +824,13 @@ function gerarInfoNutricional(p) {
 // ============================================================
 app.listen(PORT, () => {
   console.log('\n' + '='.repeat(48));
-  console.log('  🌿 NutriCare API — Servidor rodando');
+  console.log('  🌿 NutriCare API v2 — Servidor rodando');
   console.log('='.repeat(48));
-  console.log(`  URL:    http://localhost:${PORT}`);
-  console.log(`  Health: http://localhost:${PORT}/api/health`);
-  console.log(`  API:    POST http://localhost:${PORT}/api/consulta`);
-  console.log(`  Stripe: POST http://localhost:${PORT}/api/create-checkout-session`);
-  console.log(`  Stripe: GET  http://localhost:${PORT}/api/verify-payment`);
+  console.log(`  URL:      http://localhost:${PORT}`);
+  console.log(`  Health:   http://localhost:${PORT}/api/health`);
+  console.log(`  Database: ${path.basename(process.env.DATABASE_PATH || 'nutricare.db')}`);
+  console.log(`  Stripe:   ${stripe ? '✅ Configurado' : '⏳ Aguardando chave'}`);
+  console.log(`  JWT:      ${process.env.JWT_SECRET ? '✅ Configurado' : '⚠️  Modo dev'}`);
   console.log(`  Rate limit: 20 req/min por IP`);
-  console.log(`  Stripe:     ${stripe ? '✅ Configurado' : '⏳ Aguardando chave (SK_TEST)'}`);
   console.log('='.repeat(48) + '\n');
 });

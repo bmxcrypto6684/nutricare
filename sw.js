@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nutricare-v22';
+const CACHE_NAME = 'nutricare-v23';
 
 // Detecta base path automaticamente (funciona em subpastas tipo /nutricare/)
 const BASE = self.location.pathname.replace(/sw\.js$/, '');
@@ -7,7 +7,6 @@ const STATIC_ASSETS = [
   BASE,
   BASE + 'index.html',
   BASE + 'style.css',
-  BASE + 'script.js',
   BASE + 'manifest.json',
   BASE + 'favicon.png',
   BASE + 'icons/icon-192.svg',
@@ -63,10 +62,9 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Static assets: cache-first (exceto script.js que é network-first)
+  // Static assets: cache-first (exceto script.js que NUNCA é cacheado)
   if (url.pathname.includes('script.js')) {
-    event.respondWith(networkFirst(request));
-    return;
+    return; // Browser gerencia sem SW — usa ?v= cache buster do HTML
   }
   event.respondWith(cacheFirst(request));
 });
