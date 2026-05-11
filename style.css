@@ -2187,6 +2187,63 @@ h1 {
   padding: 8px 0;
 }
 
+/* ===== BOT CATEGORY GRID ===== */
+.category-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 8px 0 4px;
+}
+
+.category-card {
+  padding: 16px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  text-align: center;
+  cursor: pointer;
+  transition: all var(--transition);
+  backdrop-filter: var(--glass-blur);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.category-card:hover {
+  border-color: var(--accent-500);
+  background: var(--accent-glow);
+  box-shadow: var(--glow-accent);
+  transform: translateY(-2px);
+}
+
+.category-card:active {
+  transform: translateY(0);
+}
+
+.category-icon {
+  font-size: 1.6rem;
+  display: block;
+  line-height: 1;
+}
+
+.category-label {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.category-card:hover .category-label {
+  color: var(--accent-500);
+}
+
+@media (min-width: 768px) {
+  .category-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
 /* ===== NUTRITION CHARTS ===== */
 .charts-header {
   text-align: center;

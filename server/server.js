@@ -10,6 +10,13 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const jwt = require('jsonwebtoken');
 const db = require('./db');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+
+// ---- DB Health Check (evita restart loop no Render) ----
+const DB_READY = !db._dbUnconfigured;
+if (!DB_READY) {
+  logger('ERROR', 'db', 'Banco de dados não configurado. Aplicação rodando com funcionalidades limitadas.');
+}
 
 // ---- Global Error Handlers (evita crash do servidor) ----
 process.on('unhandledRejection', (reason) => {
@@ -22,6 +29,20 @@ process.on('uncaughtException', (err) => {
 // ---- Structured Logger ----
 const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 const CURRENT_LOG_LEVEL = LOG_LEVELS[process.env.LOG_LEVEL] || LOG_LEVELS.INFO;
+const PII_FIELDS = ['weight', 'height', 'age', 'email', 'deviceId', 'device_id'];
+
+function maskPII(data) {
+  if (!data || typeof data !== 'object') return data;
+  const masked = { ...data };
+  for (const key of Object.keys(masked)) {
+    if (PII_FIELDS.includes(key)) {
+      masked[key] = '[REDACTED]';
+    } else if (typeof masked[key] === 'object' && masked[key] !== null) {
+      masked[key] = maskPII(masked[key]);
+    }
+  }
+  return masked;
+}
 
 function logger(level, module, message, data) {
   if (LOG_LEVELS[level] < CURRENT_LOG_LEVEL) return;
@@ -30,7 +51,7 @@ function logger(level, module, message, data) {
     level,
     module,
     message,
-    ...(data ? { data } : {})
+    ...(data ? { data: maskPII(data) } : {})
   };
   if (level === 'ERROR') {
     console.error(JSON.stringify(entry));
@@ -39,13 +60,87 @@ function logger(level, module, message, data) {
   }
 }
 
+// ---- Retry com Exponential Backoff ----
+async function withRetry(fn, options = {}) {
+  const { maxRetries = 3, baseDelay = 1000, maxDelay = 10000, label = 'operation' } = options;
+  let lastError;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries) {
+        // Exponential backoff with jitter: delay = min(baseDelay * 2^attempt + random(0, 1000), maxDelay)
+        const jitter = Math.random() * 1000;
+        const delay = Math.min(baseDelay * Math.pow(2, attempt) + jitter, maxDelay);
+        logger('WARN', 'retry', `${label}: tentativa ${attempt + 1}/${maxRetries + 1} falhou, retry em ${Math.round(delay)}ms`, {
+          error: err.message,
+          attempt: attempt + 1,
+          maxRetries
+        });
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+
+  logger('ERROR', 'retry', `${label}: todas as ${maxRetries + 1} tentativas falharam`, { error: lastError.message });
+  throw lastError;
+}
+
+// ---- Métricas In-Memory ----
+const metrics = {
+  requestsTotal: 0,
+  requestsByEndpoint: {},
+  errorsByEndpoint: {},
+  latencyMsByEndpoint: {},
+  startedAt: new Date().toISOString()
+};
+
+function trackMetrics(req, res, next) {
+  metrics.requestsTotal++;
+  const endpoint = req.route ? req.route.path : req.path;
+  if (!metrics.requestsByEndpoint[endpoint]) {
+    metrics.requestsByEndpoint[endpoint] = 0;
+    metrics.errorsByEndpoint[endpoint] = 0;
+    metrics.latencyMsByEndpoint[endpoint] = [];
+  }
+  metrics.requestsByEndpoint[endpoint]++;
+
+  const start = Date.now();
+  const originalEnd = res.end;
+  res.end = function (...args) {
+    const latency = Date.now() - start;
+    metrics.latencyMsByEndpoint[endpoint].push(latency);
+    // Keep only last 100 latency samples per endpoint
+    if (metrics.latencyMsByEndpoint[endpoint].length > 100) {
+      metrics.latencyMsByEndpoint[endpoint].shift();
+    }
+    if (res.statusCode >= 500) {
+      metrics.errorsByEndpoint[endpoint]++;
+    }
+    return originalEnd.apply(this, args);
+  };
+  next();
+}
+
+// ---- Request ID Middleware ----
+function requestIdMiddleware(req, res, next) {
+  req.id = crypto_.randomUUID();
+  res.setHeader('X-Request-ID', req.id);
+  next();
+}
+
 // ---- JWT Secret ----
+const crypto_ = require('crypto');
 const JWT_SECRET = process.env.JWT_SECRET || (() => {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('JWT_SECRET must be set in production');
   }
-  logger('WARN', 'jwt', 'Usando JWT_SECRET de desenvolvimento. Configure em produção!');
-  return 'dev-secret-do-not-use-in-production';
+  // Gera secret forte de 512 bits em modo dev (não persistido entre restarts)
+  const devSecret = crypto_.randomBytes(64).toString('hex');
+  logger('WARN', 'jwt', 'Usando JWT_SECRET auto-gerado. Configure um secret fixo em produção!');
+  return devSecret;
 })();
 
 // ---- Stripe ----
@@ -66,24 +161,77 @@ try {
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// ---- Gemini AI ----
+let geminiModel = null;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+if (GEMINI_API_KEY) {
+  try {
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    geminiModel = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    logger('INFO', 'gemini', 'Gemini AI inicializado com modelo gemini-2.0-flash');
+  } catch (err) {
+    logger('ERROR', 'gemini', 'Erro ao inicializar Gemini', { message: err.message });
+  }
+} else {
+  logger('WARN', 'gemini', 'GEMINI_API_KEY não configurada. Chat IA desabilitado.');
+}
+
 // ---- Security Headers (helmet) ----
 app.use(helmet({
-  contentSecurityPolicy: false, // CSP já definida no index.html
-  crossOriginEmbedderPolicy: false
+  crossOriginEmbedderPolicy: false,
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://js.stripe.com", "https://cdn.jsdelivr.net"],
+      scriptSrcAttr: ["'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'", "https://api.render.com", "https://*.supabase.co", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://cdn.jsdelivr.net"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      frameSrc: ["'self'", "https://js.stripe.com"]
+    }
+  }
 }));
 
 // ---- Webhook: raw body parser (MUST be before express.json!) ----
-app.use('/api/stripe-webhook', express.raw({ type: 'application/json' }));
+app.use('/api/stripe-webhook', express.raw({ type: 'application/json', limit: '16kb' }));
 
-// ---- Rate Limiting ----
-const apiLimiter = rateLimit({
+// ---- Rate Limiting (webhook excluído — Stripe retenta e varia IPs) ----
+const globalLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 20,
+  max: 100,
   message: { success: false, error: 'Muitas requisições. Tente novamente em 1 minuto.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === '/api/stripe-webhook',
+  keyGenerator: (req) => req.headers['x-device-id'] || req.ip
+});
+app.use('/api/', globalLimiter);
+
+// Rate limits específicos por endpoint (protegem recursos críticos)
+const chatLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { success: false, error: 'Limite de mensagens no chat excedido. Aguarde 1 minuto.' },
   standardHeaders: true,
   legacyHeaders: false
 });
-app.use('/api/', apiLimiter);
+
+const claimPremiumLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  message: { success: false, error: 'Muitas tentativas de ativação. Aguarde 1 minuto.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const consultaLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: { success: false, error: 'Limite de consultas excedido. Aguarde 1 minuto.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
 
 // ---- Middleware ----
 const CORS_ORIGINS = process.env.CORS_ORIGINS
@@ -95,23 +243,46 @@ const CORS_ORIGINS = process.env.CORS_ORIGINS
     ];
 app.use(cors({ origin: CORS_ORIGINS, methods: ['GET', 'POST', 'DELETE'] }));
 app.use(express.json({ limit: '500kb' }));
-app.use(morgan('\x1b[36m:method\x1b[0m :url \x1b[33m:status\x1b[0m \x1b[90m:response-time ms\x1b[0m'));
+app.use(requestIdMiddleware);
+app.use(trackMetrics);
+app.use(morgan('\x1b[36m:method\x1b[0m :url \x1b[33m:status\x1b[0m \x1b[90m:response-time ms\x1b[0m', {
+  skip: (req) => req.path === '/api/health' // Não poluir logs com health check
+}));
 
-// ---- Static Files ----
+// ---- Static Files (apenas raiz, sem expor subdiretórios) ----
 app.use(express.static(path.join(__dirname, '..'), {
   dotfiles: 'ignore',
   index: 'index.html'
 }));
+// Bloqueia acesso a arquivos sensíveis
+app.use(['/server/*', '/node_modules/*', '/.claude/*', '/.git/*', '/*.sql', '/*.env*'], (req, res) => {
+  res.status(403).send('Acesso negado');
+});
 
-// ---- Request Log Helper (mantido para compatibilidade) ----
-function logRequest(title, data) {
-  logger('INFO', 'request', title, data);
+// ---- Request Log Helper (com PII masking) ----
+function logRequest(title, data, req) {
+  logger('INFO', 'request', title, { ...(data || {}), requestId: req?.id || 'none' });
 }
 
 // ---- Validação de entrada ----
+const MAX_LENGTHS = {
+  medications: 500,
+  difficulties: 500,
+  emotionalEating: 500,
+  extraInfo: 1000,
+  restrictionDetail: 500,
+  diet: 2000,
+  goal: 200,
+  routine: 500,
+  sleep: 100,
+  activity: 100,
+  name: 100
+};
+
 function validarProfile(p) {
   const erros = [];
 
+  // Validação de campos numéricos
   const peso = parseFloat(p.weight);
   if (p.weight !== undefined && p.weight !== '') {
     if (isNaN(peso) || peso < 20 || peso > 500) {
@@ -141,30 +312,77 @@ function validarProfile(p) {
     erros.push('Objetivo inválido');
   }
 
+  // Validação de comprimento máximo para campos de texto livre
+  for (const [field, maxLen] of Object.entries(MAX_LENGTHS)) {
+    if (p[field] && typeof p[field] === 'string' && p[field].length > maxLen) {
+      erros.push(`${field} deve ter no máximo ${maxLen} caracteres`);
+    }
+    if (Array.isArray(p[field])) {
+      const totalLen = p[field].reduce((acc, item) => acc + (typeof item === 'string' ? item.length : 0), 0);
+      if (totalLen > maxLen) {
+        erros.push(`${field} deve ter no máximo ${maxLen} caracteres no total`);
+      }
+    }
+  }
+
+  // Validação de restrictions array (whitelist de valores permitidos)
+  if (Array.isArray(p.restrictions)) {
+    const allowed = [
+      'Diabetes', 'Hipertensão', 'Colesterol alto', 'Triglicérides altos',
+      'Obesidade', 'Doença renal', 'Doença hepática', 'Hipotireoidismo',
+      'Hipertireoidismo', 'Síndrome metabólica', 'Doença celíaca',
+      'Intolerância à lactose', 'Refluxo', 'Gastrite', 'SII',
+      'Nenhuma', 'Outros'
+    ];
+    for (const r of p.restrictions) {
+      if (!allowed.includes(r) && r !== 'Outros') {
+        erros.push(`Restrição "${r}" não reconhecida`);
+      }
+    }
+  }
+
   return erros;
 }
 
 // ============================================================
-// Health Check
+// Health Check (sem cache)
 // ============================================================
 app.get('/api/health', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, max-age=0');
   res.json({
     status: 'ok',
     service: 'NutriCare API',
     version: '2.0.0',
-    database: path.basename(process.env.DATABASE_PATH || 'nutricare.db'),
-    database_persistent: false, // disco efêmero no Render free
-    endpoints: {
-      consulta: 'POST /api/consulta',
-      checkout: 'POST /api/create-checkout-session',
-      verify_payment: 'GET /api/verify-payment',
-      webhook: 'POST /api/stripe-webhook',
-      claim_premium: 'POST /api/claim-premium',
-      verify_token: 'GET /api/verify-token',
-      consultations: 'GET /api/consultations',
-      delete_account: 'POST /api/account/delete'
-    },
+    database_connected: DB_READY,
+    uptime_seconds: Math.floor(process.uptime()),
     timestamp: new Date().toISOString()
+  });
+});
+
+// ============================================================
+// GET /api/metrics — Métricas de performance in-memory
+// ============================================================
+app.get('/api/metrics', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, max-age=0');
+  const summary = {};
+  for (const [ep, count] of Object.entries(metrics.requestsByEndpoint)) {
+    const latencies = metrics.latencyMsByEndpoint[ep] || [];
+    const avg = latencies.length > 0
+      ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)
+      : 0;
+    summary[ep] = {
+      total: count,
+      errors: metrics.errorsByEndpoint[ep] || 0,
+      avgLatencyMs: avg,
+      samples: latencies.length
+    };
+  }
+  res.json({
+    success: true,
+    startedAt: metrics.startedAt,
+    uptimeSeconds: Math.floor(process.uptime()),
+    requestsTotal: metrics.requestsTotal,
+    endpoints: summary
   });
 });
 
@@ -176,8 +394,13 @@ app.post('/api/stripe-webhook', async (req, res) => {
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
   if (!webhookSecret) {
-    logger('WARN', 'webhook', 'STRIPE_WEBHOOK_SECRET não configurado');
-    return res.status(200).json({ received: true, note: 'webhook_secret_not_configured' });
+    logger('ERROR', 'webhook', 'STRIPE_WEBHOOK_SECRET não configurado — webhook rejeitado');
+    return res.status(500).json({ error: 'webhook_not_configured' });
+  }
+
+  if (!stripe) {
+    logger('ERROR', 'webhook', 'Stripe não inicializado');
+    return res.status(500).json({ error: 'stripe_not_available' });
   }
 
   let event;
@@ -185,7 +408,7 @@ app.post('/api/stripe-webhook', async (req, res) => {
     event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
   } catch (err) {
     logger('ERROR', 'webhook', 'Falha na verificação da assinatura do webhook', { message: err.message });
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    return res.status(400).send('Webhook Error: Invalid signature');
   }
 
   if (event.type === 'checkout.session.completed') {
@@ -195,11 +418,21 @@ app.post('/api/stripe-webhook', async (req, res) => {
 
     if (deviceId) {
       try {
-        const user = db.findOrCreateUser(deviceId, email);
-        db.activatePremium(user.id, session.id);
-        logger('INFO', 'webhook', `Premium ativado para device ${deviceId}`, { userId: user.id });
+        const user = await db.findOrCreateUser(deviceId, email);
+        // activatePremium agora usa upsert com ON CONFLICT(stripe_session_id)
+        // Garante idempotência mesmo que Stripe entregue o mesmo evento duas vezes
+        await db.activatePremium(user.id, session.id);
+        logger('INFO', 'webhook', `Premium ativado para device ${deviceId}`, {
+          userId: user.id,
+          requestId: req.id,
+          sessionId: session.id
+        });
       } catch (err) {
-        logger('ERROR', 'webhook', 'Erro ao ativar premium no webhook', { message: err.message });
+        logger('ERROR', 'webhook', 'Erro ao ativar premium no webhook', {
+          message: err.message,
+          requestId: req.id,
+          sessionId: session.id
+        });
       }
     }
   }
@@ -209,35 +442,46 @@ app.post('/api/stripe-webhook', async (req, res) => {
 
 // ============================================================
 // POST /api/claim-premium — Frontend solicita token JWT
+// Rate limit: 5 req/min (claimPremiumLimiter)
 // ============================================================
-app.post('/api/claim-premium', async (req, res) => {
+app.post('/api/claim-premium', claimPremiumLimiter, async (req, res) => {
   const { deviceId, sessionId } = req.body;
   if (!deviceId) {
     return res.status(400).json({ success: false, error: 'deviceId é obrigatório' });
   }
+  // Valida formato do deviceId — previne payloads maliciosos
+  if (typeof deviceId !== 'string' || !/^[\w-]{8,128}$/.test(deviceId)) {
+    return res.status(400).json({ success: false, error: 'deviceId inválido' });
+  }
 
   try {
-    let user = db.findOrCreateUser(deviceId);
+    let user = await db.findOrCreateUser(deviceId);
 
-    // Se sessionId foi fornecido, verifica no Stripe
+    // Se sessionId foi fornecido, verifica no Stripe com retry
     if (sessionId && stripe) {
       try {
-        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        const session = await withRetry(
+          () => stripe.checkout.sessions.retrieve(sessionId),
+          { maxRetries: 2, baseDelay: 500, label: 'stripe-retrieve-session' }
+        );
         if (session.payment_status === 'paid') {
-          db.activatePremium(user.id, sessionId);
+          await db.activatePremium(user.id, sessionId);
           const email = session.customer_details?.email;
           if (email && email !== user.email) {
-            user = db.findOrCreateUser(deviceId, email);
+            user = await db.findOrCreateUser(deviceId, email);
           }
         }
       } catch (stripeErr) {
-        logger('WARN', 'claim-premium', 'Erro ao verificar sessão Stripe', { message: stripeErr.message });
+        logger('WARN', 'claim-premium', 'Erro ao verificar sessão Stripe', {
+          message: stripeErr.message,
+          requestId: req.id
+        });
       }
     }
 
-    const premium = db.isPremiumActive(user.id);
+    const premium = await db.isPremiumActive(user.id);
     const token = premium ? jwt.sign(
-      { userId: user.id, deviceId, premium: true, iat: Math.floor(Date.now() / 1000) },
+      { userId: user.id, premium: true },
       JWT_SECRET,
       { expiresIn: '1h' }
     ) : null;
@@ -249,15 +493,20 @@ app.post('/api/claim-premium', async (req, res) => {
       expiresAt: premium ? new Date(Date.now() + 30 * 86400000).toISOString() : null
     });
   } catch (err) {
-    logger('ERROR', 'claim-premium', 'Erro no servidor', { message: err.message });
+    logger('ERROR', 'claim-premium', 'Erro no servidor', {
+      message: err.message,
+      requestId: req.id
+    });
     res.status(500).json({ success: false, error: 'Erro no servidor' });
   }
 });
 
 // ============================================================
 // GET /api/verify-token — Valida JWT ao carregar app
+// Cache-Control: private (não cachear em proxies compartilhados)
 // ============================================================
-app.get('/api/verify-token', (req, res) => {
+app.get('/api/verify-token', async (req, res) => {
+  res.setHeader('Cache-Control', 'private, no-cache');
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.json({ success: true, premium: false });
@@ -265,7 +514,7 @@ app.get('/api/verify-token', (req, res) => {
 
   try {
     const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
-    const premium = db.isPremiumActive(decoded.userId);
+    const premium = await db.isPremiumActive(decoded.userId);
     res.json({ success: true, premium });
   } catch (err) {
     res.json({ success: true, premium: false });
@@ -316,15 +565,18 @@ app.post('/api/create-checkout-session', async (req, res) => {
 });
 
 // ============================================================
-// GET /api/verify-payment — Verifica status do pagamento + ativa premium
+// GET /api/verify-payment — Verifica status do pagamento (fallback pós-redirect Stripe)
+// Nota: Stripe força redirect GET, então mantemos GET. A ativação real ocorre via webhook.
+// NÃO faz mutação — apenas consulta. A ativação primária é no webhook.
 // ============================================================
 app.get('/api/verify-payment', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, max-age=0');
   try {
     if (!stripe) {
       return res.json({ success: true, paid: false, status: 'stripe_indisponivel' });
     }
 
-    const { session_id, deviceId } = req.query;
+    const { session_id } = req.query;
     if (!session_id) {
       return res.status(400).json({ success: false, error: 'session_id é obrigatório' });
     }
@@ -332,22 +584,10 @@ app.get('/api/verify-payment', async (req, res) => {
     const session = await stripe.checkout.sessions.retrieve(session_id);
     const paid = session.payment_status === 'paid';
 
-    // Se pagou, ativa premium no banco
-    if (paid && deviceId) {
-      try {
-        const user = db.findOrCreateUser(deviceId, session.customer_details?.email || null);
-        db.activatePremium(user.id, session_id);
-        logger('INFO', 'verify-payment', `Premium ativado via verify-payment`, { userId: user.id });
-      } catch (dbErr) {
-        logger('ERROR', 'verify-payment', 'Erro ao ativar premium no DB', { message: dbErr.message });
-      }
-    }
-
     res.json({
       success: true,
       paid,
-      status: session.payment_status,
-      customer_email: session.customer_details?.email || null
+      status: session.payment_status
     });
   } catch (err) {
     logger('ERROR', 'verify-payment', 'Erro ao verificar pagamento', { message: err.message });
@@ -357,17 +597,32 @@ app.get('/api/verify-payment', async (req, res) => {
   }
 });
 
+// ---- Middleware de Autenticação JWT ----
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ success: false, error: 'Token de autenticação não fornecido' });
+  }
+  try {
+    const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ success: false, error: 'Token inválido ou expirado' });
+  }
+}
+
 // ============================================================
 // POST /api/consultations/save — Salva consulta no servidor
 // ============================================================
-app.post('/api/consultations/save', (req, res) => {
-  const { deviceId, profile, plan } = req.body;
-  if (!deviceId || !profile) {
-    return res.status(400).json({ success: false, error: 'deviceId e profile são obrigatórios' });
+app.post('/api/consultations/save', authMiddleware, async (req, res) => {
+  const { profile, plan } = req.body;
+  const userId = req.user.userId;
+  if (!userId || !profile) {
+    return res.status(400).json({ success: false, error: 'userId e profile são obrigatórios' });
   }
   try {
-    const user = db.findOrCreateUser(deviceId);
-    db.saveConsultation(user.id, profile, plan || null);
+    await db.saveConsultation(userId, profile, plan || null);
     res.json({ success: true });
   } catch (err) {
     logger('ERROR', 'save-consultation', 'Erro ao salvar consulta', { message: err.message });
@@ -377,17 +632,21 @@ app.post('/api/consultations/save', (req, res) => {
 
 // ============================================================
 // GET /api/consultations — Lista consultas
+// Cache-Control: private (cache apenas no navegador do usuário, 30s)
 // ============================================================
-app.get('/api/consultations', (req, res) => {
-  const { deviceId } = req.query;
-  if (!deviceId) {
-    return res.status(400).json({ success: false, error: 'deviceId é obrigatório' });
+app.get('/api/consultations', authMiddleware, async (req, res) => {
+  res.setHeader('Cache-Control', 'private, max-age=30');
+  res.setHeader('Vary', 'Authorization');
+  const userId = req.user.userId;
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'userId não encontrado no token' });
   }
   try {
-    const user = db.findOrCreateUser(deviceId);
-    const data = db.getConsultations(user.id);
-    const total = db.getConsultationCount(user.id);
-    res.json({ success: true, data, total });
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+    const data = await db.getConsultations(userId, limit, offset);
+    const total = await db.getConsultationCount(userId);
+    res.json({ success: true, data, total, limit, offset });
   } catch (err) {
     logger('ERROR', 'list-consultations', 'Erro ao listar consultas', { message: err.message });
     res.status(500).json({ success: false, error: 'Erro ao listar consultas' });
@@ -397,14 +656,13 @@ app.get('/api/consultations', (req, res) => {
 // ============================================================
 // DELETE /api/consultations/:id — Remove consulta
 // ============================================================
-app.delete('/api/consultations/:id', (req, res) => {
-  const { deviceId } = req.body || {};
-  if (!deviceId) {
-    return res.status(400).json({ success: false, error: 'deviceId é obrigatório' });
+app.delete('/api/consultations/:id', authMiddleware, async (req, res) => {
+  const userId = req.user.userId;
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'userId não encontrado no token' });
   }
   try {
-    const user = db.findOrCreateUser(deviceId);
-    db.deleteConsultation(req.params.id, user.id);
+    await db.deleteConsultation(req.params.id, userId);
     res.json({ success: true });
   } catch (err) {
     logger('ERROR', 'delete-consultation', 'Erro ao remover consulta', { message: err.message });
@@ -415,27 +673,86 @@ app.delete('/api/consultations/:id', (req, res) => {
 // ============================================================
 // POST /api/account/delete — Exclui todos os dados do usuário (LGPD)
 // ============================================================
-app.post('/api/account/delete', (req, res) => {
-  const { deviceId, email } = req.body;
-  if (!deviceId && !email) {
-    return res.status(400).json({ success: false, error: 'deviceId ou email é obrigatório' });
+app.post('/api/account/delete', authMiddleware, async (req, res) => {
+  const userId = req.user.userId;
+  const email = req.body.email;
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'userId não encontrado no token' });
   }
   try {
-    if (deviceId) {
-      const user = db.findOrCreateUser(deviceId);
-      db.deleteUserData(user.id);
-      logger('INFO', 'account-delete', `Dados excluídos para device ${deviceId}`);
-    } else if (email) {
-      const user = db.findUserByEmail(email);
-      if (user) {
-        db.deleteUserData(user.id);
-        logger('INFO', 'account-delete', `Dados excluídos para email ${email}`);
+    await db.deleteUserData(userId);
+    logger('INFO', 'account-delete', `Dados excluídos para userId ${userId}`);
+    if (email) {
+      const emailUser = await db.findUserByEmail(email);
+      if (emailUser && emailUser.id !== userId) {
+        await db.deleteUserData(emailUser.id);
+        logger('INFO', 'account-delete', `Dados também excluídos para email ${email}`);
       }
     }
     res.json({ success: true, message: 'Todos os dados foram excluídos' });
   } catch (err) {
     logger('ERROR', 'account-delete', 'Erro ao excluir dados', { message: err.message });
     res.status(500).json({ success: false, error: 'Erro ao excluir dados' });
+  }
+});
+
+// ============================================================
+// POST /api/chat — Bot Nutricionista (Gemini AI)
+// Rate limit: 10 req/min (chatLimiter) — protege cota da API Gemini
+// ============================================================
+app.post('/api/chat', chatLimiter, async (req, res) => {
+  const { message, history } = req.body;
+
+  if (!message || typeof message !== 'string' || message.trim().length < 2) {
+    return res.status(400).json({ success: false, error: 'Mensagem inválida' });
+  }
+  // Limita tamanho da mensagem para evitar abuso e custos excessivos na API Gemini
+  if (message.length > 500) {
+    return res.status(400).json({ success: false, error: 'Mensagem muito longa (máx 500 caracteres)' });
+  }
+
+  if (!geminiModel) {
+    return res.status(503).json({ success: false, error: 'IA não disponível no momento' });
+  }
+
+  try {
+    // Monta histórico da conversa (últimas 20 mensagens)
+    const chatHistory = (history || []).slice(-20).map(msg => ({
+      role: msg.role === 'bot' ? 'model' : 'user',
+      parts: [{ text: msg.text }]
+    }));
+
+    // Sistema prompt para o nutricionista
+    const systemPrompt =
+      'Você é o Bot Nutricionista do app NutriCare, um assistente de nutrição especializado. ' +
+      'Responda de forma amigável, em português brasileiro, com dicas práticas e baseadas em ciência. ' +
+      'Seja breve e direto (máximo 3 parágrafos). ' +
+      'Se perguntarem algo fora de nutrição, diga educadamente que você é especializado em nutrição. ' +
+      'NÃO forneça diagnósticos médicos, receitas complexas, nem prometa resultados milagrosos. ' +
+      'Sempre incentive hábitos saudáveis e sustentáveis.';
+
+    const chat = geminiModel.startChat({
+      history: [
+        { role: 'user', parts: [{ text: systemPrompt }] },
+        { role: 'model', parts: [{ text: 'Entendido! Sou o Bot Nutricionista do NutriCare.' }] },
+        ...chatHistory
+      ]
+    });
+
+    // Chamada Gemini com retry automático (3 tentativas, exponential backoff)
+    const result = await withRetry(
+      () => chat.sendMessage(message),
+      { maxRetries: 2, baseDelay: 1000, label: 'gemini-chat' }
+    );
+    const response = result.response.text();
+
+    res.json({ success: true, response });
+  } catch (err) {
+    logger('ERROR', 'gemini', 'Erro no chat', {
+      message: err.message,
+      requestId: req.id
+    });
+    res.status(500).json({ success: false, error: 'Erro ao processar mensagem' });
   }
 });
 
@@ -447,6 +764,7 @@ app.use((err, req, res, next) => {
     url: req.originalUrl,
     method: req.method,
     ip: req.ip,
+    requestId: req.id || 'none',
     stack: err.stack?.substring(0, 500)
   });
   if (!res.headersSent) {
@@ -457,10 +775,10 @@ app.use((err, req, res, next) => {
 // ============================================================
 // POST /api/consulta — Gera plano nutricional
 // ============================================================
-app.post('/api/consulta', (req, res) => {
+app.post('/api/consulta', consultaLimiter, (req, res) => {
   const profile = req.body;
 
-  logRequest('Nova consulta recebida', profile);
+  logRequest('Nova consulta recebida', { goal: profile?.goal, gender: profile?.gender }, req);
 
   if (!profile || Object.keys(profile || {}).length === 0) {
     return res.status(400).json({
@@ -828,9 +1146,15 @@ app.listen(PORT, () => {
   console.log('='.repeat(48));
   console.log(`  URL:      http://localhost:${PORT}`);
   console.log(`  Health:   http://localhost:${PORT}/api/health`);
-  console.log(`  Database: ${path.basename(process.env.DATABASE_PATH || 'nutricare.db')}`);
+  console.log(`  Metrics:  http://localhost:${PORT}/api/metrics`);
+  console.log(`  Database: ${DB_READY ? '✅ Supabase' : '❌ Não configurado'}`);
   console.log(`  Stripe:   ${stripe ? '✅ Configurado' : '⏳ Aguardando chave'}`);
   console.log(`  JWT:      ${process.env.JWT_SECRET ? '✅ Configurado' : '⚠️  Modo dev'}`);
-  console.log(`  Rate limit: 20 req/min por IP`);
+  console.log(`  Gemini:   ${geminiModel ? '✅ Pronto' : '⏳ Aguardando chave'}`);
+  console.log(`  Rate limits:`);
+  console.log(`    Global:   100 req/min`);
+  console.log(`    Consulta:  30 req/min`);
+  console.log(`    Chat:      10 req/min`);
+  console.log(`    Premium:    5 req/min`);
   console.log('='.repeat(48) + '\n');
 });

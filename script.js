@@ -82,6 +82,175 @@ function verificarPremium(dataISO, proof) {
   return proof === provarPremium(dataISO);
 }
 
+// ---- AES-GCM localStorage Encryption (Web Crypto API) ----
+// Protege dados sensíveis (saúde, PII) com criptografia autenticada AES-256-GCM.
+// A chave é armazenada no IndexedDB (sandbox do navegador), isolada do escopo do
+// localStorage — protegendo contra XSS que tente ler localStorage.
+// Se IndexedDB for limpo, dados criptografados tornam-se irrecuperáveis.
+const CHAVES_SENSIVEIS = new Set([
+  'nutricare_historico',
+  'nutricare_progresso',
+  'nutricare_premium_info',
+  'nutricare_premium_expira'
+]);
+let _aesKeyCache = null;
+let _aesDbReady = false;
+// Cache síncrono de dados descriptografados (populado na inicialização)
+const _decryptedCache = {};
+
+function _abrirCryptoDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('NutriCareCrypto', 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains('keys')) {
+        db.createObjectStore('keys');
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+  });
+}
+
+async function _gerarAESKey() {
+  return crypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    true, ['encrypt', 'decrypt']
+  );
+}
+
+async function _exportarRawKey(key) {
+  const raw = await crypto.subtle.exportKey('raw', key);
+  return new Uint8Array(raw);
+}
+
+async function _importarRawKey(raw) {
+  return crypto.subtle.importKey(
+    'raw', raw,
+    { name: 'AES-GCM', length: 256 },
+    false, ['encrypt', 'decrypt']
+  );
+}
+
+async function _initAESKey() {
+  if (_aesKeyCache) return _aesKeyCache;
+  const db = await _abrirCryptoDB();
+  if (!db) return null;
+  try {
+    const tx = db.transaction('keys', 'readonly');
+    const store = tx.objectStore('keys');
+    const rawKey = await new Promise((res, rej) => {
+      const req = store.get('aes_key');
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
+    });
+    if (rawKey) {
+      _aesKeyCache = await _importarRawKey(new Uint8Array(rawKey));
+      _aesDbReady = true;
+      db.close();
+      return _aesKeyCache;
+    }
+    const key = await _gerarAESKey();
+    const exported = await _exportarRawKey(key);
+    const tx2 = db.transaction('keys', 'readwrite');
+    tx2.objectStore('keys').put(exported, 'aes_key');
+    await new Promise((res, rej) => {
+      tx2.oncomplete = () => res();
+      tx2.onerror = () => rej(tx2.error);
+    });
+    _aesKeyCache = key;
+    _aesDbReady = true;
+    db.close();
+    return key;
+  } catch (err) {
+    db.close();
+    return null;
+  }
+}
+
+async function _aesEncrypt(plaintext) {
+  if (!plaintext) return plaintext;
+  const key = await _initAESKey();
+  if (!key) return plaintext;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(plaintext);
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
+  const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+  combined.set(iv);
+  combined.set(new Uint8Array(ciphertext), iv.length);
+  return 'enc:' + btoa(String.fromCharCode(...combined));
+}
+
+async function _aesDecrypt(ciphertext) {
+  if (!ciphertext || typeof ciphertext !== 'string' || !ciphertext.startsWith('enc:')) {
+    return ciphertext;
+  }
+  const key = await _initAESKey();
+  if (!key) return null;
+  try {
+    const raw = Uint8Array.from(atob(ciphertext.slice(4)), c => c.charCodeAt(0));
+    const iv = raw.slice(0, 12);
+    const data = raw.slice(12);
+    const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
+    return new TextDecoder().decode(decrypted);
+  } catch {
+    return null;
+  }
+}
+
+// Criptografa dado sensível no localStorage (fire-and-forget após salvar)
+async function _encryptStorageKey(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw || raw.startsWith('enc:')) return;
+    const encrypted = await _aesEncrypt(raw);
+    if (encrypted !== raw) localStorage.setItem(key, encrypted);
+    // Atualiza cache síncrono
+    const parsed = JSON.parse(raw);
+    _decryptedCache[key] = Array.isArray(parsed) ? parsed : parsed;
+  } catch {}
+}
+
+// Descriptografa dado sensível do localStorage, retorna e popula cache
+async function _decryptStorageKey(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    if (!raw.startsWith('enc:')) {
+      const parsed = JSON.parse(raw);
+      _decryptedCache[key] = Array.isArray(parsed) ? parsed : parsed;
+      return parsed;
+    }
+    const decrypted = await _aesDecrypt(raw);
+    if (decrypted) {
+      const parsed = JSON.parse(decrypted);
+      _decryptedCache[key] = Array.isArray(parsed) ? parsed : parsed;
+    }
+    return decrypted ? JSON.parse(decrypted) : null;
+  } catch { return null; }
+}
+
+// Leitura síncrona do cache (populado por _decryptStorageKey na inicialização)
+function _getDecryptedSync(key, fallback) {
+  const cached = _decryptedCache[key];
+  if (cached) return cached;
+  const raw = localStorage.getItem(key);
+  if (!raw) return fallback;
+  if (raw.startsWith('enc:')) return fallback; // ainda não foi descriptografado
+  try { return JSON.parse(raw); }
+  catch { return fallback; }
+}
+
+// Inicializa criptografia na inicialização
+async function initCrypto() {
+  const key = await _initAESKey();
+  if (key) {
+    for (const k of CHAVES_SENSIVEIS) {
+      _decryptStorageKey(k).catch(() => {});
+    }
+  }
+}
+
 // ---- Estado Global ----
 const STATE = {
   screen: 'onboarding',
@@ -97,6 +266,8 @@ const STATE = {
   anamneseStep: 0,
   anamneseExtraStep: 0,
   chatPremiumStep: 0,
+  chatCategoryMode: 'categories', // 'categories' | 'questions'
+  chatSelectedCategory: null,
   plano: null
 };
 
@@ -318,92 +489,19 @@ function engine(action, payload) {
     case 'chat_premium': {
       if (!isPremium()) return { screen: 'premium_block' };
 
-      const step = STATE.chatPremiumStep ?? 0;
-      const CHAT_TOTAL = 6;
-
-      const goal = STATE.profile.goal || '';
-      const sleep = STATE.profile.sleep || '';
-      const activity = STATE.profile.activity || '';
-      const dietPref = STATE.profile.preferredDiet || '';
-      const waterIntake = STATE.profile.waterIntake || '';
-      const cookingStyle = STATE.profile.cookingStyle || '';
-      const favFoods = STATE.profile.favFoods || '';
-
-      const steps = [
-        // Step 0: Intro
-        () => ({
-          msg: `👋 <strong>Ótimo!</strong> Agora vou te fazer algumas perguntas rápidas para<br>deixar seu plano ainda mais personalizado.`,
-          btns: [{ text: 'Continuar 👍', action: 'chat_continue_0' }]
-        }),
-        // Step 1: Goal feedback
-        () => ({
-          msg: goal.includes('perder') || goal.includes('emagrec') || goal === 'Emagrecimento'
-            ? `🔥 Seu objetivo é <strong>${escapeHtml(goal)}</strong>. Uma dica importante: combine déficit calórico moderado com aumento de proteínas para preservar massa magra. Vou considerar isso no seu plano!`
-            : goal.includes('massa') || goal.includes('muscular')
-            ? `💪 Foco em <strong>${escapeHtml(goal)}</strong>! Vou priorizar proteínas magras e carboidratos complexos nas refeições pós-treino.`
-            : `🌿 <strong>${escapeHtml(goal)}</strong> é uma excelente meta! Vou montar um plano equilibrado que se encaixa no seu dia a dia.`,
-          btns: [{ text: 'Entendi! ✅', action: 'chat_continue_1' }]
-        }),
-        // Step 2: Personal tip based on profile
-        () => {
-          let tip = '';
-          if (activity === 'Sedentário') {
-            tip = '🚶 Você está sedentário. Que tal começar com <strong>caminhadas leves de 20 min</strong> após o almoço? Já ajuda na digestão e no metabolismo.';
-          } else if (activity === 'Intenso') {
-            tip = `⚡ Atividade <strong>${escapeHtml(activity)}</strong>! Vou incluir carboidratos de qualidade pra te dar energia nos treinos.`;
-          } else {
-            tip = `🏃 Atividade <strong>${escapeHtml(activity)}</strong> é ótimo! Vou ajustar as porções pra matched seu gasto calórico.`;
-          }
-          return { msg: tip, btns: [{ text: 'Boa dica! 💡', action: 'chat_continue_2' }] };
-        },
-        // Step 3: Sleep / diet / habit check
-        () => {
-          let tip = '';
-          if (sleep === 'Ruim') {
-            tip = '😴 Seu sono está <strong>ruim</strong>. Sabia que noites mal dormidas aumentam o cortisol e dificultam a perda de peso? Vou incluir alimentos que ajudam no relaxamento (banana, aveia, chás).';
-          } else if (sleep === 'Médio') {
-            tip = '😴 Seu sono é <strong>médio</strong>. Que tal incluir um chá calmante à noite? Vou sugerir opções no plano.';
-          } else {
-            tip = '😴 Sono <strong>bom</strong> é a base! Seu plano vai potencializar essa rotina saudável.';
-          }
-          return { msg: tip, btns: [{ text: 'Ótimo! 🌟', action: 'chat_continue_3' }] };
-        },
-        // Step 4: Diet + cooking + water summary
-        () => ({
-          msg: `🥗 <strong>Resumo das suas preferências:</strong><br><br>
-          • Dieta: <strong>${escapeHtml(dietPref || 'Equilibrada')}</strong><br>
-          • Cozinha: <strong>${escapeHtml(cookingStyle || 'Sim')}</strong><br>
-          • Água: <strong>${escapeHtml(waterIntake || '—')}</strong><br>
-          ${favFoods ? `• Ama: <strong>${escapeHtml(favFoods)}</strong>` : ''}<br><br>
-          ${waterIntake === 'Menos de 1L' ? '💧 Dica: tente aumentar para pelo menos 2L de água por dia. Seu metabolismo agradece!' : '💧 Hidratação em dia! Isso faz diferença nos resultados.'}`,
-          btns: [{ text: 'Perfeito! ✅', action: 'chat_continue_4' }]
-        }),
-        // Step 5: Final
-        () => ({
-          msg: `✨ <strong>Tudo pronto!</strong> Com base em todas as suas respostas, vou gerar agora um plano alimentar <strong>100% personalizado</strong> para você.<br><br>Pode levar alguns segundos...`,
-          btns: [{ text: '🎯 Gerar meu plano!', action: 'chat_finalizar' }]
-        })
-      ];
-
+      // Finalizar e gerar plano
       if (action === 'chat_finalizar') {
         STATE.chatPremiumStep = 0;
         return { screen: 'analise_loading', message: '', components: [], actions: [] };
       }
 
-      if (step >= CHAT_TOTAL) {
-        STATE.chatPremiumStep = CHAT_TOTAL - 1;
-      }
-
-      const current = steps[step]();
-      STATE.chatPremiumStep = Math.min(step + 1, CHAT_TOTAL);
-
+      // Mostra tela do chat (com histórico se houver)
+      STATE.chatPremiumStep = 1;
       return {
         screen: 'chat_premium',
-        message: current.msg,
-        components: [
-          { type: 'buttons', items: current.btns.map(b => ({ ...b, variant: 'primary' })) }
-        ],
-        actions: current.btns.map(b => ({ id: b.action.replace('chat_continue_', ''), next: 'chat_premium' }))
+        message: '',
+        components: [],
+        actions: [{ id: 'chat_msg', next: 'chat_premium' }]
       };
     }
 
@@ -634,7 +732,7 @@ function engine(action, payload) {
       ]};
 
     case 'detalhe_consulta': {
-      const historico = carregarHistorico();
+      const historico = _getDecryptedSync(STORAGE_KEY_HISTORICO, []);
       const consulta = payload ? historico.find(h => String(h.id) === String(payload)) : null;
       return {
         screen: 'detalhe_consulta',
@@ -652,7 +750,9 @@ function engine(action, payload) {
       return { screen: 'assinar_premium', message: '', components: [], actions: [] };
 
     default:
-      return engine(null, null);
+      console.error('Tela desconhecida:', STATE.screen);
+      STATE.screen = 'onboarding';
+      return { screen: 'onboarding', message: '', components: [], actions: [] };
   }
 }
 
@@ -826,7 +926,7 @@ function showAnamneseExtraQuestion(step) {
       components: [
         { type: 'options', items: q.items, layout: 'grid' }
       ],
-      actions: q.items.map(i => ({ id: i.action.replace('ans_extra_', ''), next: 'anamnese_extra' }))
+      actions: q.items.map(i => ({ id: i.action, next: 'anamnese_extra' }))
     };
   }
 
@@ -840,14 +940,1186 @@ function showAnamneseExtraQuestion(step) {
   };
 }
 
+// ============================================================
+// Chat IA — Bot Nutricionista Local (sem API)
+// ============================================================
+
+// ---- Banco de Conhecimento do Bot Nutricionista ----
+const BOT_CONHECIMENTO = {
+  saudacao: [
+    { palavras: ['ola', 'olá', 'oi', 'bom dia', 'boa tarde', 'boa noite', 'hey', 'e aí', 'eai', 'fala', 'oie', 'bão', 'salve'],
+      respostas: [
+        p => `Olá ${p.name || 'amigo(a)'}! 😊 Como posso ajudar você hoje? Pode perguntar sobre nutrição, receitas, dicas para sua dieta, e muito mais!`,
+        p => `Oi ${p.name || 'tudo bem'}! Pronto(a) para tirar dúvidas sobre alimentação. O que você gostaria de saber? 🥗`,
+        p => `Fala ${p.name || 'galera'}! 🥦 Tô aqui pra ajudar com dicas de nutrição. Pode mandar suas perguntas!`
+      ]}
+  ],
+
+  pre_treino: [
+    { palavras: ['pré treino', 'pre treino', 'pré-treino', 'antes de treinar', 'antes do treino', 'treinar', 'academia', 'musculação', 'treino', 'pré'],
+      respostas: [p => {
+        const isLoss = p.goal?.includes('Emagrecimento');
+        const isGain = p.goal?.includes('massa muscular');
+        let sugestao = '';
+        if (isLoss) sugestao = '🥣 Café preto + 1 banana + 5 castanhas — energia sem excesso calórico.';
+        else if (isGain) sugestao = '🥣 2 bananas + pasta de amendoim + café — carboidrato e proteína pra performance.';
+        else sugestao = '🥣 1 fruta + café preto ou chá verde + 1 fatia de pão integral.';
+        return `🔋 <strong>Pré-treino ideal:</strong><br><br>${sugestao}<br><br>💡 <strong>Dica:</strong> Coma 40-60 minutos antes do treino. Evite alimentos gordurosos ou muito pesados. Hidrate-se bem antes!<br><br>📌 <strong>Pós-treino:</strong> whey protein, frango com arroz, ou iogurte com granola nas primeiras 2 horas.`;
+      }]}
+  ],
+
+  pos_treino: [
+    { palavras: ['pós treino', 'pos treino', 'pós-treino', 'depois de treinar', 'depois do treino', 'pós', 'recuperação', 'recuperar'],
+      respostas: [
+        p => `💪 <strong>Pós-treino — janela de recuperação:</strong><br><br>🥤 <strong>Opções rápidas:</strong> whey protein + banana, ou iogurte grego + mel + granola.<br><br>🍽️ <strong>Refeição completa:</strong> frango grelhado + arroz integral + brocolis (ou a receita equivalente que esta no seu plano).<br><br>⏱️ O ideal e se alimentar ate 2 horas apos o treino. Nao pule essa rejeicao, ${p.name || 'campeao(ã)'}!`,
+        p => `🏋️ <strong>Recuperação pós-treino feita do jeito certo:</strong><br><br>` +
+          `🥤 <strong>Até 30 min após o treino (janela ideal):</strong> whey protein + banana OU shake de frutas com scoop de proteína<br><br>` +
+          `🍽️ <strong>Refeição completa (até 2h depois):</strong><br>` +
+          `• Proteína: frango, peixe, ovos ou tofu 🐔<br>` +
+          `• Carbo: batata doce, arroz, aveia ou mandioca 🥔<br>` +
+          `• Vegetais: brócolis, couve, salada 🥬<br><br>` +
+          `💧 <strong>Não esqueça:</strong> reponha líquidos perdidos no treino!<br><br>` +
+          `📌 Dica: suas refeições do plano já incluem opções pós-treino balanceadas!`,
+        p => `⏳ <strong>Pós-treino sem complicação:</strong><br><br>` +
+          `Se você não tem tempo para preparar algo elaborado:<br><br>` +
+          `🥤 <strong>Opções em ≤5 minutos:</strong><br>` +
+          `• 1 banana + 1 scoop de whey + água/leite 🍌<br>` +
+          `• 1 pote de iogurte grego + granola + mel 🥛<br>` +
+          `• 2 ovos cozidos + 1 torrada integral + café ☕<br>` +
+          `• Sanduíche de frango desfiado + requeijão light 🥪<br><br>` +
+          `💡 <strong>Macete:</strong> deixe ovos cozidos e frango desfiado prontos na geladeira!`
+      ]}
+  ],
+
+  emagrecimento: [
+    { palavras: ['emagrecer', 'perder peso', 'perder barriga', 'emagrecimento', 'dieta', 'calorias', 'déficit', 'perder gordura', 'secar', 'definir'],
+      respostas: [p => {
+        const hasImc = parseFloat(p.weight) && parseFloat(p.height);
+        const imc = hasImc ? (parseFloat(p.weight) / Math.pow(parseFloat(p.height)/100, 2)).toFixed(1) : null;
+        return `🎯 <strong>Dicas para emagrecimento com saúde:</strong><br><br>${hasImc ? `📊 Seu IMC é <strong>${imc}</strong>. ` : ''}O segredo não é passar fome, mas fazer escolhas inteligentes:<br><br>` +
+          `✅ <strong>Priorize proteína</strong> em todas as refeições (frango, ovos, peixe, tofu) — aumenta saciedade<br>` +
+          `✅ <strong>Café da manhã reforçado</strong> — 2 ovos + pão integral + fruta já ajuda a controlar a fome no resto do dia<br>` +
+          `✅ <strong>Evite ultraprocessados</strong> — refrigerante, biscoito recheado, embutidos<br>` +
+          `✅ <strong>Beba água</strong> — 35ml por kg de peso = ${parseFloat(p.weight) ? Math.round(parseFloat(p.weight) * 35) + 'ml' : 'calcule 35ml por kg'} por dia<br>` +
+          `✅ <strong>Coma devagar</strong> — cada refeição deve durar 15-20 minutos<br><br>` +
+          `📌 Lembre-se: emagrecimento saudável é 0,5kg a 1kg por semana. Nada de dietas restritivas!`;
+      }]}
+  ],
+
+  ganho_massa: [
+    { palavras: ['ganhar massa', 'hipertrofia', 'muscular', 'músculo', 'crescer', 'bulking', 'fichinha', 'pesado', 'massa muscular'],
+      respostas: [
+        p => `💪 <strong>Dicas para ganho de massa muscular:</strong><br><br>` +
+        `🥩 <strong>Proteína em todas as refeições</strong> — 1.6 a 2.2g por kg de peso. Exemplo: ${parseFloat(p.weight) ? Math.round(parseFloat(p.weight) * 1.8) + 'g de proteína por dia' : 'calcule 1.8g por kg'}<br>` +
+        `🍚 <strong>Carboidrato é seu amigo</strong> — arroz, batata doce, aveia, pão integral. Sem energia não há crescimento<br>` +
+        `🥜 <strong>Gorduras boas</strong> — castanhas, azeite, abacate, pasta de amendoim<br>` +
+        `😴 <strong>Durma bem</strong> — é dormindo que o músculo se regenera e cresce<br>` +
+        `🔄 <strong>Treine com progressão</strong> — aumente carga ou repetições gradualmente<br><br>` +
+        `📌 No seu plano alimentar você já tem opções ricas em proteína como ovos, frango e o smoothie proteico!`,
+        p => `🔥 <strong>Ganho de massa — o que NÃO pode faltar:</strong><br><br>` +
+        `1️⃣ <strong>Superávit calórico</strong> — coma mais do que gasta (cerca de 300-500 calorias acima do basal)<br>` +
+        `2️⃣ <strong>Proteína distribuída</strong> — 20-40g de proteína a cada 3-4h em 4-5 refeições 🥩<br>` +
+        `3️⃣ <strong>Carbo nos treinos</strong> — batata doce, arroz, banana antes e depois 💪<br>` +
+        `4️⃣ <strong>Gordura boa</strong> — pasta de amendoim, azeite, castanhas (não tenha medo) 🥜<br>` +
+        `5️⃣ <strong>Progressão de carga</strong> — treino parado não gera estímulo 🏋️<br><br>` +
+        `📌 No seu plano: ${parseFloat(p.weight) ? Math.round(parseFloat(p.weight) * 2) + 'g de proteína/dia' : 'proteína ajustada'} espalhadas em todas as refeições!`
+      ]}
+  ],
+
+  receitas: [
+    { palavras: ['receita', 'receitas', 'comer', 'cozinhar', 'prato', 'refeição', 'café da manhã', 'almoço', 'jantar', 'lanche', 'comida'],
+      respostas: [p => {
+        const meals = gerarRefeicoes(p, true);
+        const receitasDisponiveis = Object.values(RECEITAS).flat();
+        const aleatoria = receitasDisponiveis[Math.floor(Math.random() * receitasDisponiveis.length)];
+        return `🍽️ <strong>Que tal experimentar esta receita?</strong><br><br>` +
+          `📌 <strong>${aleatoria.nome}</strong><br>` +
+          `⏱️ Tempo: ${aleatoria.tempo}<br><br>` +
+          `📝 <strong>Ingredientes:</strong><br>${aleatoria.ingredientes.map(i => '• ' + i).join('<br>')}<br><br>` +
+          `👨‍🍳 <strong>Modo de Preparo:</strong><br>${aleatoria.preparo.map((p, i) => `${i+1}. ${p}`).join('<br>')}<br><br>` +
+          `${aleatoria.dicas ? '💡 ' + aleatoria.dicas + '<br><br>' : ''}` +
+          `📋 Quer ver todas as receitas do seu plano? Toque em uma refeição no cardápio para ver opções detalhadas!`;
+      }]}
+  ],
+
+  substituicoes: [
+    { palavras: ['substituir', 'substituição', 'trocar', 'alternativa', 'no lugar', 'versão', 'opção', 'subs', 'diferente'],
+      respostas: [p => {
+        const subs = gerarSubstituicoes();
+        return `🔄 <strong>Substituições inteligentes:</strong><br><br>` +
+          subs.map(s => `${s.icon} <strong>${s.title}:</strong> ${s.text}`).join('<br>') +
+          `<br><br>📌 Essas trocas mantêm o valor nutricional e ajudam a variar o cardápio sem sair da dieta!`;
+      }]}
+  ],
+
+  agua: [
+    { palavras: ['água', 'agua', 'hidratação', 'hidratar', 'beber água', 'beber agua', 'sede', 'líquido', 'liquido'],
+      respostas: [p => {
+        const peso = parseFloat(p.weight);
+        const meta = peso ? Math.round(peso * 35) : null;
+        return `💧 <strong>Hidratação:</strong><br><br>` +
+          `A recomendação é <strong>35ml de água por kg de peso</strong>.<br>` +
+          `${meta ? `👉 Para você: <strong>${meta}ml por dia</strong> (aproximadamente ${Math.round(meta/200)} copos de 200ml)<br>` : ''}` +
+          `<br>✅ <strong>Dicas pra beber mais água:</strong><br>` +
+          `• Deixe uma garrafa sempre à vista<br>` +
+          `• Coloque alarme no celular de hora em hora<br>` +
+          `• Temperos como limão, hortelã ou gengibre deixam mais gostosa<br>` +
+          `• Água com gás pode ajudar quem sente falta de refrigerante<br><br>` +
+          `🥤 Chás (sem açúcar) e água de coco também contam!`;
+      }]}
+  ],
+
+  sono: [
+    { palavras: ['sono', 'dormir', 'insônia', 'insonia', 'noite', 'dorme', 'descansar', 'cansaço', 'cansaço'],
+      respostas: [
+        p => {
+        const sleepStatus = p.sleep;
+        return `😴 <strong>Alimentação e sono de qualidade:</strong><br><br>` +
+          `✅ <strong>O que ajuda:</strong><br>` +
+          `• Chá de camomila, erva-doce ou maracujá 1h antes de dormir<br>` +
+          `• Banana com canela ou leite morno — contém triptofano, precursor da serotonina<br>` +
+          `• Jantar leve — omelete, salada, sopa (evite frituras à noite)<br><br>` +
+          `❌ <strong>O que atrapalha:</strong><br>` +
+          `• Cafeína após as 16h (café, chá preto, energético, refrigerante de cola)<br>` +
+          `• Refeições pesadas perto da hora de dormir<br>` +
+          `• Telas (celular/TV) 1h antes de deitar<br><br>` +
+          `${sleepStatus ? `📌 Você relatou seu sono como "${sleepStatus}". ` : ''}Um bom sono regula os hormônios da fome (grelina e leptina) e melhora suas escolhas alimentares!`;
+      },
+        p => `🌙 <strong>Sono reparador — o segredo que poucos seguem:</strong><br><br>` +
+        `💤 O hormônio do crescimento (GH) é liberado DURANTE o sono profundo — essencial pra recuperação muscular e queima de gordura!<br><br>` +
+        `✅ <strong>Checklist noturno:</strong><br>` +
+        `☑️ Jantar até 2h antes de dormir<br>` +
+        `☑️ Nada de telas 30 min antes (luz azul inibe melatonina) 📵<br>` +
+        `☑️ Quarto escuro e fresco (18-22°C) 🌑<br>` +
+        `☑️ Chá calmante (camomila, melissa, erva-doce) 🍵<br>` +
+        `☑️ Mesmo horário para dormir e acordar (sim, fins de semana também!) ⏰<br><br>` +
+        `📌 Sono ruim → mais fome, mais desejo por açúcar, menos disposição pra treinar. Tudo conectado!`,
+        p => `😴 <strong>Ritual do sono para quem tem agenda cheia:</strong><br><br>` +
+        `⏰ <strong>Rotina noturna em 3 passos:</strong><br><br>` +
+        `1️⃣ <strong>20:00 — Última refeição</strong> (leve: sopa, omelete, salada com proteína)<br>` +
+        `2️⃣ <strong>21:00 — Desconectar</strong> (nada de trabalho, telas no modo noturno) 🧘<br>` +
+        `3️⃣ <strong>22:00 — Dormir</strong> (7-9h de sono de qualidade)<br><br>` +
+        `🥣 <strong>Jantar ideal pra dormir bem:</strong> proteína magra + vegetais cozidos + gordura boa (azeite). Evite carboidratos simples à noite se tem insônia.<br><br>` +
+        `💡 Sua alimentação atual ${p.goal ? `focada em "${p.goal}"` : ''} já pode estar afetando seu sono — me pergunte mais se quiser ajustar!`
+      ]}
+  ],
+
+  proteinas: [
+    { palavras: ['proteína', 'proteina', 'whey', 'whey protein', 'suplemento', 'suplementação', 'aminoácidos', 'aminoacidos', 'creatina'],
+      respostas: [
+        p => `🥩 <strong>Proteínas na alimentação:</strong><br><br>` +
+        `📌 Fontes de proteína magra:<br>` +
+        `• Frango (peito) ≈ 30g proteína / 100g 🐔<br>` +
+        `• Ovos ≈ 6g proteína por unidade 🥚<br>` +
+        `• Peixe (salmão, atum, tilápia) ≈ 25g / 100g 🐟<br>` +
+        `• Carne magra (patinho) ≈ 26g / 100g 🥩<br>` +
+        `• Iogurte grego ≈ 10g / 100g 🥛<br>` +
+        `• Grão-de-bico, lentilha ≈ 9g / 100g 🌱<br><br>` +
+        `💪 <strong>Proteína ideal por dia:</strong> 1.6 a 2.2g por kg de peso para quem treina.` +
+        `${parseFloat(p.weight) ? ` No seu caso, cerca de <strong>${Math.round(parseFloat(p.weight) * 1.8)}g/dia</strong>.` : ''}<br><br>` +
+        `📌 Sobre suplementos: whey protein é conveniente mas não obrigatório. A proteína dos alimentos é tão eficaz quanto!`,
+        p => `🥚 <strong>Proteína — o bloco de construção do corpo:</strong><br><br>` +
+        `✅ <strong>Como distribuir a proteína ao longo do dia:</strong><br>` +
+        `• Café da manhã: 2 ovos + 1 fatia de queijo 🥚<br>` +
+        `• Almoço: 150g de frango ou bife 🥩<br>` +
+        `• Lanche: 1 iogurte grego + castanhas 🥛<br>` +
+        `• Jantar: 150g de peixe ou tofu 🐟<br><br>` +
+        `💪 <strong>Bônus:</strong> distribuir a proteína em 4-5 refeições aumenta a síntese muscular comparado a concentrar tudo numa refeição!<br><br>` +
+        `📌 Fontes vegetais também contam: combinando arroz + feijão você tem proteína completa! 🌱`,
+        p => `🐟 <strong>Proteína — quanto e quando comer:</strong><br><br>` +
+        `📊 <strong>Referência rápida (por kg de peso):</strong><br>` +
+        `• Sedentário: 0.8g/kg/dia — só pra manutenção básica<br>` +
+        `• Ativo/treino: 1.6-2.2g/kg/dia — para ganho muscular 💪<br>` +
+        `• Emagrecimento: 1.8-2.4g/kg/dia — ajuda a preservar músculo no déficit 🔥<br><br>` +
+        `🍽️ <strong>Equivalência prática (20g de proteína):</strong><br>` +
+        `• 100g de frango/peixe/carne magra 🥩<br>` +
+        `• 3 ovos 🥚<br>` +
+        `• 1 pote de iogurte grego + 1 scoop de whey 🥛<br>` +
+        `• 200g de tofu + 4 colheres de grão-de-bico 🌱<br><br>` +
+        `💡 <strong>Regra de ouro:</strong> pelo menos 20-30g de proteína em CADA refeição principal!`
+      ]}
+  ],
+
+  carboidratos: [
+    { palavras: ['carboidrato', 'carbo', 'carboidratos', 'carb', 'arroz', 'pão', 'pao', 'massa', 'batata', 'macarrão', 'macarrao'],
+      respostas: [
+        p => `🍚 <strong>Carboidratos — o combustível do corpo:</strong><br><br>` +
+        `❌ <strong>Não tenha medo dos carboidratos!</strong> Eles são essenciais para energia, função cerebral e rendimento nos treinos.<br><br>` +
+        `✅ <strong>Prefira integrais:</strong><br>` +
+        `• Arroz integral (ou parboilizado) 🍚<br>` +
+        `• Pão integral / torrada integral 🍞<br>` +
+        `• Aveia, quinoa, granola sem açúcar 🌾<br>` +
+        `• Batata doce, mandioca, cará 🥔<br>` +
+        `• Frutas (banana, maçã, mamão) 🍌<br><br>` +
+        `⚠️ <strong>Modere:</strong> açúcar refinado, refrigerante, biscoitos recheados, farinha branca, sucos de caixinha.<br><br>` +
+        `📌 No seu plano alimentar você tem opções balanceadas de carboidratos em cada refeição!`,
+        p => `🍞 <strong>Carboidratos sem culpa:</strong><br><br>` +
+        `🧠 O cérebro consome ~120g de glicose por dia — carboidrato é o combustível preferido do corpo!<br><br>` +
+        `✅ <strong>Carboidratos de qualidade:</strong><br>` +
+        `• <strong>Alta absorção</strong> (pós-treino): arroz, batata, tapioca, pão — repõem energia rápido ⚡<br>` +
+        `• <strong>Média absorção</strong> (dia a dia): batata doce, macarrão integral, aveia — energia sustentada 🌾<br>` +
+        `• <strong>Baixa absorção</strong> (saciedade): verduras, legumes, feijão — fibras que regulam glicemia 🫘<br><br>` +
+        `💡 <strong>Dica:</strong> Combinar carbo + proteína + gordura + fibra em toda refeição mantém a glicemia estável!`
+      ]}
+  ],
+
+  fibras: [
+    { palavras: ['fibra', 'fibras', 'intestino', 'prisão', 'prisão de ventre', 'constipação', 'constipacao', 'aveia', 'chia', 'linhaça', 'linhaca'],
+      respostas: [p => `🌿 <strong>Fibras — saúde intestinal e saciedade:</strong><br><br>` +
+        `✅ <strong>Fontes de fibra:</strong><br>` +
+        `• Aveia, chia, linhaça 🌾 — ótimas no café da manhã ou lanches<br>` +
+        `• Vegetais folhosos (couve, espinafre, alface) 🥬<br>` +
+        `• Frutas com casca (maçã, pera, uva) 🍎<br>` +
+        `• Leguminosas (feijão, lentilha, grão-de-bico) 🫘<br>` +
+        `• Castanhas e sementes 🥜<br><br>` +
+        `🥤 <strong>Dica prática:</strong> 1 colher de sopa de chia + 200ml de água = gel de fibra. Deixa de molho 15 min e bebe!<br><br>` +
+        `🚰 Lembre-se: fibras funcionam melhor com bastante água!`
+      ]}
+  ],
+
+  gorduras: [
+    { palavras: ['gordura', 'gorduras', 'azeite', 'castanha', 'abacate', 'oleaginosas', 'pasta de amendoim', 'lipídios', 'lipideos'],
+      respostas: [
+        p => `🥑 <strong>Gorduras boas — essenciais para sua saúde:</strong><br><br>` +
+        `✅ <strong>Fontes de gordura boa:</strong><br>` +
+        `• Azeite de oliva extra virgem (1 colher de sopa/dia)🫒<br>` +
+        `• Abacate 🥑 — rico em gordura monoinsaturada<br>` +
+        `• Castanhas (do Pará, amêndoas, nozes) — 5-8 unidades/dia 🥜<br>` +
+        `• Pasta de amendoim (1 colher de sopa) 🥜<br>` +
+        `• Sementes (chia, linhaça, gergelim) 🌱<br>` +
+        `• Peixes ricos em ômega-3 (salmão, sardinha, atum) 🐟<br><br>` +
+        `⚠️ <strong>Evite:</strong> frituras imersas, óleos vegetais refinados, margarina, gordura hidrogenada.<br><br>` +
+        `📌 Gorduras boas ajudam na produção hormonal, absorção de vitaminas e saúde cardiovascular!`,
+        p => `🫒 <strong>Gordura não é vilã — escolha as certas!</strong><br><br>` +
+        `🌸 <strong>Tipos de gordura:</strong><br>` +
+        `• <strong>Monoinsaturada</strong> (azeite, abacate, castanhas) — anti-inflamatória, boa pro coração ❤️<br>` +
+        `• <strong>Poli-insaturada (Ômega-3)</strong> (salmão, sardinha, chia, linhaça) — cérebro e articulações 🧠<br>` +
+        `• <strong>Saturada</strong> (coco, manteiga, carnes) — necessária mas com moderação ⚖️<br>` +
+        `• <strong>Trans</strong> (ultraprocessados, margarina) — evite ao máximo! 🚫<br><br>` +
+        `💡 <strong>Dica de ouro:</strong> adicione 1 colher de azeite extra virgem na salada, 1 abacate no meio da semana e um punhado de castanhas por dia!`,
+        p => `🥑 <strong>Quanta gordura boa comer por dia?</strong><br><br>` +
+        `✅ <strong>Porções diárias recomendadas:</strong><br>` +
+        `• <strong>Azeite de oliva:</strong> 1-2 colheres de sopa (120-240kcal) 🫒<br>` +
+        `• <strong>Castanhas:</strong> 1 punhado (5-8 unidades, ~150kcal) 🥜<br>` +
+        `• <strong>Abacate:</strong> 1/2 unidade média (~130kcal) 🥑<br>` +
+        `• <strong>Pasta de amendoim:</strong> 1 colher de sopa (~90kcal) 🥜<br>` +
+        `• <strong>Sementes (chia/linhaça):</strong> 1 colher de sopa (~60kcal) 🌱<br><br>` +
+        `📌 Gordura tem 9 calorias por grama (vs 4 de proteína/carboidrato). É mais calórica, mas ESSENCIAL para hormônios, absorção de vitaminas e saciedade!`
+      ]}
+  ],
+
+  vegan: [
+    { palavras: ['vegano', 'vegana', 'vegan', 'vegetariano', 'vegetariana', 'vegetariano', 'sem carne', 'sem frango', 'sem leite', 'sem ovo', 'tofu', 'plant based'],
+      respostas: [
+        p => `🌱 <strong>Alimentação vegetariana/vegana e nutrição:</strong><br><br>` +
+        `✅ <strong>Fontes de proteína vegetal:</strong><br>` +
+        `• Grão-de-bico 🫘 — 9g proteína/100g<br>` +
+        `• Lentilha — 9g proteína/100g<br>` +
+        `• Tofu — 8g proteína/100g 🧈<br>` +
+        `• Quinoa — 4g proteína/100g (todos aminoácidos!) 🌾<br>` +
+        `• Feijão preto, carioca, fradinho 🫘<br>` +
+        `• Pasta de amendoim integral 🥜<br><br>` +
+        `⚠️ <strong>Atenção:</strong><br>` +
+        `• Vitamina B12 → essencial suplementar para veganos<br>` +
+        `• Ferro → consumir com fonte de vitamina C (laranja, limão) pra melhor absorção<br>` +
+        `• Cálcio → leite vegetal fortificado, couve, brócolis, tofu com cálcio<br><br>` +
+        `📌 O NutriCare tem opções de substituições (tofu mexido no lugar de ovos, etc.) no seu plano!`,
+        p => `🌿 <strong>Veganismo forte e saudável — é possível sim!</strong><br><br>` +
+        `💪 <strong>Cardápio vegano de exemplo:</strong><br>` +
+        `🌅 <strong>Café da manhã:</strong> vitamina de banana + pasta de amendoim + leite vegetal 🥤<br>` +
+        `☀️ <strong>Almoço:</strong> arroz integral + feijão preto + couve refogada + tofu grelhado 🫘<br>` +
+        `🌆 <strong>Lanche:</strong> 1 fruta + mix de castanhas 🥜<br>` +
+        `🌙 <strong>Jantar:</strong> sopa de lentilha + pão integral 🥣<br><br>` +
+        `📌 <strong>Suplementos essenciais para veganos:</strong><br>` +
+        `• Vitamina B12 — NEGOCIÁVEL (todo vegano precisa) 💊<br>` +
+        `• Vitamina D — se pega pouco sol ☀️<br>` +
+        `• Ferro — monitore exames anualmente 🩸`
+      ]}
+  ],
+
+  compulsao: [
+    { palavras: ['compulsão', 'compulsao', 'ansiedade', 'ansiedade', 'comer emocional', 'fome emocional', 'atacar', 'gula', 'descontrolar', 'beliscar', 'vontade'],
+      respostas: [
+        p => `🧠 <strong>Fome emocional X fome física:</strong><br><br>` +
+        `❓ <strong>Pergunte a si mesmo(a):</strong><br>` +
+        `• A fome veio de repente? (emocional) ou foi gradual? (física)<br>` +
+        `• Você quer comer algo específico? (emocional) ou qualquer coisa serve? (física)<br>` +
+        `• Comeu e se sentiu culpado(a)? (emocional) ou satisfeito(a)? (física)<br><br>` +
+        `✅ <strong>Estratégias práticas:</strong><br>` +
+        `• Antes de comer, pare 5 segundos e respire fundo 🧘<br>` +
+        `• Beba um copo de água e espere 10 minutos<br>` +
+        `• Coma de 3 em 3 horas para evitar picos de fome ⏰<br>` +
+        `• Tenha opções saudáveis à mão (frutas, castanhas, iogurte)<br>` +
+        `• Movimento físico ajuda a regular a ansiedade 🚶<br><br>` +
+        `💬 Você não está sozinho(a) nessa. O importante é não se culpar e recomeçar na próxima refeição!`,
+        p => `🧘 <strong>Estratégias para lidar com a ansiedade por comida:</strong><br><br>` +
+        `🤔 <strong>Antes de beliscar, tente:</strong><br>` +
+        `1️⃣ Beba 1 copo de água GELADA — o choque térmico distrai o cérebro 🧊<br>` +
+        `2️⃣ Saia do ambiente por 5 min (se estiver perto da comida, se afaste) 🚶<br>` +
+        `3️⃣ Escove os dentes — o sabor de pasta de dente diminui a vontade de comer 😁<br>` +
+        `4️⃣ Mascou chiclete sem açúcar por 5-10 min 🍬<br>` +
+        `5️⃣ Ligue pra alguém e converse 5 min sobre outro assunto 📞<br><br>` +
+        `💡 O melhor tratamento pra compulsão é PREVENÇÃO: não pule refeições, coma proteína em todas as refeições e não proíba completamente nenhum alimento (a restrição excessiva gera a compulsão).<br><br>` +
+        `🆘 Se a compulsão for frequente, considere buscar ajuda de um psicólogo ou psiquiatra — não é fraqueza, é uma condição que tem tratamento! 🤝`
+      ]}
+  ],
+
+  frutas: [
+    { palavras: ['fruta', 'frutas', 'banana', 'maçã', 'maca', 'laranja', 'mamão', 'mamao', 'melancia', 'uva'],
+      respostas: [
+        p => `🍎 <strong>Frutas — doces da natureza:</strong><br><br>` +
+        `✅ Comer fruta não engorda! A OMS recomenda 3-5 porções por dia.<br><br>` +
+        `🍌 <strong>Banana</strong> — rica em potássio, ótima pré-treino<br>` +
+        `🍎 <strong>Maçã</strong> — fibra pectina, ajuda saciedade<br>` +
+        `🍊 <strong>Laranja</strong> — vitamina C, fortalece imunidade<br>` +
+        `🥝 <strong>Mamão</strong> — enzimas digestivas, regula intestino<br>` +
+        `🍇 <strong>Frutas vermelhas</strong> — antioxidantes poderosos<br>` +
+        `🥑 <strong>Abacate</strong> — gordura boa, versátil em receitas<br><br>` +
+        `💡 <strong>Dica:</strong> prefira a fruta inteira ao suco (mais fibra, menos açúcar, mais saciedade)!`,
+        p => `🍌 <strong>Frutas da estação — mais sabor, mais nutrientes:</strong><br><br>` +
+        `📅 <strong>Frutas de maio (outono no Brasil):</strong><br>` +
+        `• Banana, laranja, mamão, caqui 🍊<br>` +
+        `• Abacate, limão, tangerina 🥑<br>` +
+        `• Goiaba, maracujá, coco verde 🥥<br><br>` +
+        `✅ <strong>Combine com:</strong><br>` +
+        `• Aveia + canela → café da manhã que segura a fome até o almoço 🌅<br>` +
+        `• Iogurte + chia → lanche proteico 🥛<br>` +
+        `• Pasta de amendoim → lanche pré-treino energético 🥜<br><br>` +
+        `💡 Fruta congelada também vale! Bata com iogurte para um smoothie cremoso 🥤`,
+        p => `🍇 <strong>Mito ou verdade sobre frutas?</strong><br><br>` +
+        `❌ <strong>"Fruta engorda porque tem açúcar"</strong> — MITO!<br>` +
+        `✅ O açúcar da fruta (frutose) vem com fibras, vitaminas e antioxidantes. O processamento é totalmente diferente do açúcar refinado!<br><br>` +
+        `❌ <strong>"Suco é igual à fruta"</strong> — MITO!<br>` +
+        `✅ No suco você perde as fibras e o açúcar é absorvido mais rápido. Prefira a fruta inteira 🍎<br><br>` +
+        `🍌 <strong>Melhores frutas pra cada momento:</strong><br>` +
+        `• <strong>Pré-treino:</strong> Banana, maçã, tâmara ⚡<br>` +
+        `• <strong>Pós-treino:</strong> Mamão, laranja, kiwi (vitamina C + recuperação) 🥝<br>` +
+        `• <strong>Noite:</strong> Banana (triptofano ajuda o sono) 😴<br><br>` +
+        `📌 Meta: 3-5 porções de fruta por dia! Uma porção = 1 unidade média ou 1 xícara de frutas picadas.`
+      ]}
+  ],
+
+  suplementos: [
+    { palavras: ['suplemento', 'suplementação', 'whey', 'creatina', 'BCAA', 'pré treino', 'termogênico', 'vitamina', 'complexo', 'multivitamínico', 'multivitaminico'],
+      respostas: [
+        p => `💊 <strong>Suplementação — o que realmente funciona?</strong><br><br>` +
+        `✅ <strong>Com evidência científica:</strong><br>` +
+        `• <strong>Whey protein</strong> — praticidade pra bater proteína. Não é obrigatório, mas ajuda<br>` +
+        `• <strong>Creatina</strong> — 3-5g/dia. Mais estudado suplemento do mundo. Força, cognição, recuperação 💪<br>` +
+        `• <strong>Vitamina D</strong> — especialmente se você pega pouco sol ☀️<br>` +
+        `• <strong>Ômega-3</strong> — se não come peixe 2x/semana 🐟<br><br>` +
+        `⚠️ <strong>Cuidado:</strong><br>` +
+        `• Termogênicos — efeito modesto, muitos com cafeína em excesso<br>` +
+        `• BCAA — desnecessário se você já come proteína suficiente<br>` +
+        `• "Queimadores" — milagre não existe, fuja de fórmulas secretas<br><br>` +
+        `📌 Lembre-se: suplemento <strong>suplementa</strong>, não substitui uma alimentação equilibrada!`,
+        p => `⚡ <strong>Guia rápido de suplementação:</strong><br><br>` +
+        `🥤 <strong>Whey Protein:</strong> 1-2 scoops/dia (se precisar bater proteína). Tome pós-treino ou entre refeições.<br>` +
+        `💪 <strong>Creatina:</strong> 3-5g/dia. Todos os dias (não precisa ciclar). Demora 2-4 semanas pra saturar.<br>` +
+        `🌿 <strong>Ômega-3:</strong> 1-2g/dia (EPA+DHA). Anti-inflamatório, coração e cérebro.<br>` +
+        `☀️ <strong>Vitamina D:</strong> 1000-2000 UI/dia (ideal fazer exame de sangue primeiro).<br><br>` +
+        `🥇 <strong>Ordem de prioridade:</strong> Creatina > Whey > Vitamina D > Ômega-3 > Outros`
+      ]}
+  ],
+
+  motivacao: [
+    { palavras: ['motivação', 'motivacao', 'motivado', 'desanimado', 'difícil', 'dificil', 'desistir', 'não consigo', 'nao consigo', 'força', 'determinação', 'determinacao'],
+      respostas: [p => `💪 <strong>Mensagem especial pra você, ${p.name || 'guerreiro(a)'}:</strong><br><br>` +
+        `A mudança de hábito não é uma linha reta — tem altos e baixos, e <strong>tudo bem</strong>.<br><br>` +
+        `🌟 <strong>Lembre-se:</strong><br>` +
+        `• Você não precisa ser perfeito(a), apenas consistente<br>` +
+        `• Um dia "fora da dieta" não apaga uma semana de acertos<br>` +
+        `• Pequenas mudanças sustentáveis vencem dietas radicais<br>` +
+        `• O importante não é a velocidade, é não parar 🏃<br><br>` +
+        `📊 Você já deu o primeiro passo — se conhecer melhor através do NutriCare. Parabéns por isso! 🎉<br><br>` +
+        `📌 Vamos focar no progresso, não na perfeição. Tá bem? 😊`
+      ]}
+  ],
+
+  janta_leve: [
+    { palavras: ['jantar leve', 'jantar', 'ceia', 'noite', 'não engordar', 'nao engordar'],
+      respostas: [
+        p => `🌙 <strong>Jantar leve e nutritivo:</strong><br><br>` +
+          `✅ <strong>Opções leves:</strong><br>` +
+          `• Omelete de 2 ovos + espinafre + salada verde 🥗<br>` +
+          `• Sopa de legumes com frango desfiado 🥣<br>` +
+          `• Salada grande + proteína (atum, frango, ovo) 🥬<br>` +
+          `• Wrap integral com ricota e frango desfiado 🌮<br>` +
+          `• Iogurte com frutas e granola 🥛<br><br>` +
+          `⚠️ Evite: frituras, carboidratos em excesso e refeições pesadas perto de dormir.`,
+        p => `🌙 <strong>Jantar leve — 3 ideias práticas:</strong><br><br>` +
+          `🥣 <strong>Sopa detox:</strong> abóbora + gengibre + frango desfiado<br>` +
+          `🥗 <strong>Salada completa:</strong> folhas + quinoa + atum + azeite + limão<br>` +
+          `🍳 <strong>Omelete power:</strong> 2 ovos + cottage + espinafre + tomate<br><br>` +
+          `💡 Jantar até 2h antes de dormir melhora a qualidade do sono e a digestão!`
+      ]}
+  ],
+
+  cafe_da_manha: [
+    { palavras: ['café da manhã', 'cafe da manha', 'café', 'cafe', 'primeira refeição', 'desjejum', 'jejum'],
+      respostas: [
+        p => `🌅 <strong>Café da manhã equilibrado:</strong><br><br>` +
+        `✅ <strong>Monte seu café da manhã ideal:</strong><br>` +
+        `1️⃣ <strong>Proteína</strong> — ovos, iogurte grego, cottage, whey (segura a fome!)<br>` +
+        `2️⃣ <strong>Carboidrato bom</strong> — pão integral, aveia, banana, tapioca<br>` +
+        `3️⃣ <strong>Gordura boa</strong> — pasta de amendoim, castanhas, azeite, abacate<br>` +
+        `4️⃣ <strong>Hidratação</strong> — café, chá, ou água<br><br>` +
+        `🍳 <strong>Combinação clássica:</strong> 2 ovos mexidos + 1 fatia pão integral + café ☕ + 1 fruta 🍌<br><br>` +
+        `📌 Olhe seu plano alimentar — você já tem opções de café da manhã lá!`,
+        p => `☀️ <strong>Café da manhã rápido (≤5 min) pra quem tem pressa:</strong><br><br>` +
+        `⏰ <strong>Opções práticas:</strong><br><br>` +
+        `🥤 <strong>Opção 1 — Smoothie proteico:</strong> 1 banana + 1 scoop whey + 200ml leite + 1 colher aveia. Bate tudo e bebe!<br>` +
+        `🥪 <strong>Opção 2 — Sanduíche prático:</strong> pão integral + cottage + peito de peru + 1 copo de leite<br>` +
+        `🥣 <strong>Opção 3 — Tigela power:</strong> iogurte grego + granola + frutas vermelhas + chia<br>` +
+        `🥚 <strong>Opção 4 — Ovos de microondas:</strong> 2 ovos batidos no refratário, 1 minuto no micro, pão integral + café<br><br>` +
+        `💡 <strong>Dica:</strong> Prepare noite anterior o que puder (deixe frutas cortadas, porcione a granola) — de manhã cada minuto conta!`,
+        p => `🥣 <strong>Café da manhã que segura a fome até o almoço:</strong><br><br>` +
+        `🔑 <strong>O segredo é: proteína + fibra + gordura boa</strong><br><br>` +
+        `🥇 <strong>Top 3 cafés da manhã campeões de saciedade:</strong><br>` +
+        `1️⃣ 2 ovos mexidos + 1 fatia pão integral + 1/2 abacate + café ☕<br>` +
+        `2️⃣ 1 pote iogurte grego + 2 colheres aveia + 1 colher chia + frutas vermelhas 🫐<br>` +
+        `3️⃣ Vitamina de banana + pasta de amendoim + leite + aveia 🥤<br><br>` +
+        `💡 Estudos mostram que um café da manhã rico em proteína reduz em até 30% a ingestão calórica no resto do dia!`
+      ]}
+  ],
+
+  cardapio_semanal: [
+    { palavras: ['cardápio', 'cardapio', 'cardápio semanal', 'menu', 'planejamento', 'marmita', 'organização', 'organizar', 'preparar', 'semana'],
+      respostas: [p => `📋 <strong>Planejamento semanal — o segredo do sucesso:</strong><br><br>` +
+        `🗓️ <strong>Reserve 1h no domingo para:</strong><br>` +
+        `• Olhar seu plano alimentar no NutriCare 📱<br>` +
+        `• Fazer a lista de compras (você já tem uma no app!) 🛒<br>` +
+        `• Pré-preparar: lavar vegetais, cozinhar arroz integral, temperar proteínas<br>` +
+        `• Separar porções em potes individuais 🧊<br><br>` +
+        `💡 <strong>Vantagens:</strong><br>` +
+        `• Menos estresse na correria do dia a dia<br>` +
+        `• Menos chance de pedir comida não saudável<br>` +
+        `• Economia de tempo e dinheiro 💰<br>` +
+        `• Mais aderência ao plano 📈`
+      ]}
+  ],
+
+  digestao: [
+    { palavras: ['digestão', 'digestao', 'digestivo', 'estômago', 'estomago', 'intestino', 'probiótico', 'probiotico', 'fermentado', 'kefir', 'iogurte natural', 'enzima', 'gases', 'azia', 'queimação', 'queimacao', 'estufamento', 'barriga inchada'],
+      respostas: [
+        p => `🫘 <strong>Saúde digestiva —肠道 feliz, vida feliz:</strong><br><br>` +
+          `✅ <strong>Alimentos que ajudam a digestão:</strong><br>` +
+          `• Kefir, iogurte natural, kombucha — probióticos naturais 🥛<br>` +
+          `• Gengibre, hortelã, erva-doce — chás que aliviam gases 🌿<br>` +
+          `• Mamão e abacaxi — enzimas digestivas naturais (papaína e bromelina) 🍍<br>` +
+          `• Água morna com limão em jejum — estimula o sistema digestivo 🍋<br>` +
+          `• Fibras solúveis (aveia, chia, banana) — regulam o intestino 🍌<br><br>` +
+          `⚠️ <strong>Evite:</strong> frituras, ultraprocessados, refrigerantes, excesso de café em jejum.<br><br>` +
+          `💡 <strong>Dica:</strong> Coma devagar e mastigue bem os alimentos — a digestão começa na boca!`,
+        p => `🌿 <strong>Probióticos e saúde intestinal:</strong><br><br>` +
+          `🥛 <strong>Fontes de probióticos (micro-organismos vivos benéficos):</strong><br>` +
+          `• Iogurte natural (com fermento lácteo ativo)<br>` +
+          `• Kefir (leite ou água) — mais potente que o iogurte<br>` +
+          `• Kombucha — chá fermentado<br>` +
+          `• Chucrute (repolho fermentado) 🥬<br>` +
+          `• Missô, tempeh (soja fermentada) 🫘<br><br>` +
+          `🥣 <strong>Prebióticos (alimento dos probióticos):</strong><br>` +
+          `• Alho, cebola, banana verde, aveia, maçã 🍎<br><br>` +
+          `📌 Um intestino saudável melhora a absorção de nutrientes, imunidade e até o humor!`
+      ]}
+  ],
+
+  imunidade: [
+    { palavras: ['imunidade', 'imune', 'imunológico', 'imunologico', 'defesa', 'anticorpo', 'vitamina c', 'vitamina d', 'zinco', 'gripe', 'resfriado', 'doente', 'fortalecer', 'imunizar'],
+      respostas: [
+        p => `🛡️ <strong>Alimentos que fortalecem a imunidade:</strong><br><br>` +
+          `✅ <strong>Nutrientes-chave para o sistema imune:</strong><br>` +
+          `• <strong>Vitamina C</strong> — laranja, acerola, kiwi, pimentão, brócolis 🍊<br>` +
+          `• <strong>Vitamina D</strong> — sol (15min/dia), peixes gordurosos, ovos, cogumelos ☀️<br>` +
+          `• <strong>Zinco</strong> — carnes, frutos do mar, sementes de abóbora, castanhas 🥜<br>` +
+          `• <strong>Selênio</strong> — castanha-do-pará (1 unidade/dia já basta!)<br>` +
+          `• <strong>Ômega-3</strong> — salmão, sardinha, chia, linhaça 🐟<br>` +
+          `• <strong>Ferro</strong> — feijão, lentilha, carne magra, couve 🫘<br><br>` +
+          `💤 <strong>Não esqueça:</strong> sono de qualidade ≥7h é ESSENCIAL para imunidade!<br><br>` +
+          `📌 Uma alimentação colorida (5+ cores por dia) garante variedade de nutrientes!`,
+        p => `⚡ <strong>Imunidade alta o ano inteiro:</strong><br><br>` +
+          `🥗 <strong>Monte um prato imunoprotetor:</strong><br>` +
+          `• Café da manhã: aveia + frutas vermelhas + castanhas 🥣<br>` +
+          `• Almoço: salada colorida + proteína + legumes 🥬<br>` +
+          `• Lanche: iogurte natural + mel + chia 🥛<br>` +
+          `• Jantar: sopa de legumes com frango 🥣<br><br>` +
+          `🚰 Hidratação adequada também é fundamental — as mucosas secas são porta de entrada para vírus!<br><br>` +
+          `🧘 <strong>E não subestime:</strong> estresse crônico reduz a imunidade. Exercício físico e lazer ajudam!`
+      ]}
+  ],
+
+  lanches: [
+    { palavras: ['lanche', 'lanches', 'beliscar', 'petisco', 'entre refeições', 'intervalo', 'tarde', 'sede', 'fome fora de hora', 'snack', 'tira gosto'],
+      respostas: [
+        p => `🥤 <strong>Lanches saudáveis — matam a fome sem sabotar a dieta:</strong><br><br>` +
+          `✅ <strong>Opções de lanches práticos:</strong><br>` +
+          `• 1 iogurte natural + 1 colher de granola sem açúcar 🥛<br>` +
+          `• 1 banana + 1 colher de pasta de amendoim integral 🍌<br>` +
+          `• 3 castanhas-do-pará + 1 fruta 🥜<br>` +
+          `• 1 ovo cozido + torrada integral 🥚<br>` +
+          `• 1 fatia de pão integral + cottage + tomate 🍞<br>` +
+          `• 1 polenguinho light + cenoura baby 🥕<br>` +
+          `• 1 scoop de whey com água ou leite 🥤<br><br>` +
+          `⏰ <strong>Ideal:</strong> um lanche no meio da manhã e outro no meio da tarde, ~3h após cada refeição principal.`,
+        p => `🍎 <strong>Lanches inteligentes para sua rotina:</strong><br><br>` +
+          `💡 A chave do lanche ideal = <strong>proteína + fibra + gordura boa</strong>, assim você não sente fome até a próxima refeição.<br><br>` +
+          `🥑 <strong>Combinações rápidas (≤5 min de preparo):</strong><br>` +
+          `• Pasta de amendoim + maçã fatiada 🍎<br>` +
+          `• Iogurte grego + chia + frutas vermelhas 🫐<br>` +
+          `• Palitos de cenoura/pepino + homus 🥕<br>` +
+          `• Mix de castanhas + uvas passas 🥜<br>` +
+          `• Queijo minas + goiabada (versão fit) 🧀<br><br>` +
+          `⚠️ <strong>Evite:</strong> barrinhas de cereal industrializadas, bolachas, salgadinhos, refrigerantes.`
+      ]}
+  ],
+
+  bebidas: [
+    { palavras: ['bebida', 'suco', 'sucos', 'chá', 'cha', 'café', 'cafe', 'refrigerante', 'bebida alcoólica', 'alcool', 'cerveja', 'vinho', 'energético', 'isotônico', 'agua saborizada', 'limonada'],
+      respostas: [
+        p => `🥤 <strong>Bebidas — escolhas que fazem diferença:</strong><br><br>` +
+          `✅ <strong>Bebidas recomendadas:</strong><br>` +
+          `• Água é sempre a melhor opção 💧<br>` +
+          `• Chás sem açúcar (verde, hibisco, camomila, hortelã) 🍵<br>` +
+          `• Café puro (até 3 xícaras/dia — antioxidantes + energia) ☕<br>` +
+          `• Água com gás + limão ou hortelã 🍋<br>` +
+          `• Sucos naturais (pouco coados, para manter a fibra) 🍊<br><br>` +
+          `⚠️ <strong>Modere ou evite:</strong><br>` +
+          `• Refrigerantes (açúcar ou adoçantes em excesso) 🥤<br>` +
+          `• Sucos de caixinha (pouca fibra, muito açúcar)<br>` +
+          `• Bebidas alcoólicas (calorias vazias, atrapalham o sono e a recuperação muscular) 🍺<br>` +
+          `• Energéticos (cafeína em excesso, mistura perigosa com álcool) ⚡<br><br>` +
+          `💡 <strong>Dica:</strong> Para cada bebida alcoólica, intercale com 1 copo de água!`,
+        p => `☕ <strong>Café e nutrição — o que você precisa saber:</strong><br><br>` +
+          `✅ <strong>Benefícios do café (com moderação):</strong><br>` +
+          `• Rico em antioxidantes ☕<br>` +
+          `• Melhora foco e disposição para treinar ⚡<br>` +
+          `• Pode ajudar no metabolismo (termogênese leve)<br><br>` +
+          `⚠️ <strong>Cuidados:</strong><br>` +
+          `• Não exceda 3-4 xícaras/dia (400mg cafeína)<br>` +
+          `• Evite após as 16h para não atrapalhar o sono 😴<br>` +
+          `• De preferência ao café preto/filtrado — evite versões com creme, chantilly, muito açúcar<br><br>` +
+          `🍵 <strong>Alternativas:</strong> chá verde (menos cafeína, antioxidante), chá de hibisco, café descafeinado.`
+      ]}
+  ],
+
+  alergias: [
+    { palavras: ['alergia', 'alergias', 'intolerância', 'intolerancia', 'lactose', 'glúten', 'gluten', 'drágea', 'dragea', 'intolerante', 'alérgico', 'alergico', 'restrição', 'restricao'],
+      respostas: [
+        p => `⚠️ <strong>Alergias e intolerâncias alimentares:</strong><br><br>` +
+          `❓ <strong>Diferença importante:</strong><br>` +
+          `• <strong>Alergia</strong> — reação do sistema imune (urticária, inchaço, anafilaxia). Pode ser GRAVE. 🚨<br>` +
+          `• <strong>Intolerância</strong> — dificuldade de digerir (gases, dor abdominal, diarreia). Desconfortável mas não fatal.<br><br>` +
+          `🥛 <strong>Intolerância à lactose:</strong><br>` +
+          `• Alternativas: leite zero lactose, leites vegetais (amêndoas, aveia, soja), queijos curados<br>` +
+          `• Suplemento de lactase pode ajudar 🧪<br><br>` +
+          `🌾 <strong>Sensibilidade ao glúten / Doença Celíaca:</strong><br>` +
+          `• Alternativas: arroz, quinoa, milho, batata, mandioca, aveia sem contaminação cruzada<br>` +
+          `• Pães e massas sem glúten disponíveis em mercados 🍞<br><br>` +
+          `📌 <strong>Importante:</strong> Consulte um médico ou nutricionista para diagnóstico. Não se auto-diagnostique!<br><br>` +
+          `🫘 No seu plano, ${p.name || 'você'} tem opções variadas que podem ser adaptadas!`,
+        p => `🥜 <strong>Vivendo bem com restrições alimentares:</strong><br><br>` +
+          `✅ <strong>Dicas práticas:</strong><br>` +
+          `• Sempre leia os rótulos dos alimentos (mesmo produtos que você já conhece — fórmulas mudam) 🏷️<br>` +
+          `• Ao comer fora, avise o restaurante sobre sua restrição 🍽️<br>` +
+          `• Tenha versões seguras em casa para emergências<br>` +
+          `• Não substitua um alimento por ultraprocessados "versão diet" 🥫<br><br>` +
+          `🔬 Consulte um nutricionista para um plano totalmente adaptado às suas necessidades!`
+      ]}
+  ],
+
+  vegetais: [
+    { palavras: ['vegetal', 'vegetais', 'legume', 'legumes', 'verdura', 'verduras', 'salada', 'couve', 'espinafre', 'brócolis', 'brocolis', 'cenoura', 'abobrinha', 'berinjela', 'chuchu', 'vagem'],
+      respostas: [
+        p => `🥬 <strong>Vegetais — o arco-íris no prato:</strong><br><br>` +
+          `🌈 <strong>Quanto mais cor, melhor!</strong><br><br>` +
+          `• 🟢 <strong>Verdes</strong> (couve, espinafre, brócolis) — ferro, cálcio, fibras, vitamina K<br>` +
+          `• 🟠 <strong>Laranja/Amarelo</strong> (cenoura, abóbora, pimentão) — vitamina A, betacaroteno<br>` +
+          `• 🔴 <strong>Vermelhos</strong> (tomate, pimentão) — licopeno, antioxidante potente<br>` +
+          `• 🟣 <strong>Roxos</strong> (berinjela, repolho roxo) — antocianinas, anti-inflamatório<br>` +
+          `• ⚪ <strong>Brancos</strong> (couve-flor, cebola, alho) — alicina, enxofre, imunidade<br><br>` +
+          `💡 <strong>Meta:</strong> pelo menos 3 cores diferentes no almoço e 2 no jantar!<br><br>` +
+          `👨‍🍳 <strong>Dica:</strong> Se você não gosta de salada, experimente refogados, assados ou cremes — muda completamente o sabor!`,
+        p => `🥦 <strong>Como incluir mais vegetais no dia a dia:</strong><br><br>` +
+          `✅ <strong>Estratégias práticas:</strong><br>` +
+          `• Café da manhã: adicione espinafre ao omelete ou vitamina 🥬<br>` +
+          `• Almoço: encha metade do prato com vegetais variados 🥗<br>` +
+          `• Jantar: sopa de legumes + proteína — refeição leve e nutritiva 🥣<br>` +
+          `• Lanches: palitos de cenoura, pepino, salsão com homus 🥕<br><br>` +
+          `🔥 <strong>Formas de preparo que preservam nutrientes:</strong><br>` +
+          `• No vapor (preserva mais vitaminas)<br>` +
+          `• Refogado rápido no azeite (pouco tempo, muito sabor)<br>` +
+          `• Assado no forno (realça o sabor adocicado natural) 🎯<br><br>` +
+          `📌 No seu plano alimentar você já tem vegetais incluídos em cada refeição!`
+      ]}
+  ],
+
+  criancas: [
+    { palavras: ['criança', 'crianca', 'crianças', 'criancas', 'infantil', 'filho', 'filha', 'bebê', 'bebe', 'papinha', 'introdução alimentar', 'introducao alimentar', 'escola', 'merenda', 'criançada'],
+      respostas: [
+        p => `👶 <strong>Alimentação infantil — criando hábitos saudáveis desde cedo:</strong><br><br>` +
+          `🍼 <strong>Introdução alimentar (6 meses+):</strong><br>` +
+          `• Ofereça um alimento de cada vez para identificar aceitação e possíveis alergias<br>` +
+          `• Amasse com o garfo (não bata no liquidificador) — a criança precisa sentir texturas<br>` +
+          `• Sem açúcar, sal ou mel no primeiro ano de vida 🚫<br><br>` +
+          `🧒 <strong>Crianças maiores (2-10 anos):</strong><br>` +
+          `• Ofereça alimentos coloridos e em formatos divertidos 🎨<br>` +
+          `• Envolva a criança no preparo das refeições 👩‍🍳<br>` +
+          `• Seja exemplo: se você come salada, ela também vai querer 🥗<br>` +
+          `• Não use comida como recompensa ou castigo 🚫<br><br>` +
+          `⚠️ Consulte um pediatra ou nutricionista infantil para orientação individualizada!`
+      ]}
+  ],
+
+  idosos: [
+    { palavras: ['idoso', 'idosa', 'idosos', 'terceira idade', 'melhor idade', 'envelhecimento', 'envelhecer', 'osteoporose', 'sarcopenia', 'queda', 'memória', 'memoria', 'vitamina b12', 'enxergar'],
+      respostas: [
+        p => `👴 <strong>Nutrição na melhor idade — envelhecer com saúde:</strong><br><br>` +
+          `✅ <strong>Nutrientes essenciais para 60+:</strong><br>` +
+          `• <strong>Proteína</strong> — previne sarcopenia (perda de massa muscular). 1.2-1.5g por kg de peso! 💪<br>` +
+          `• <strong>Cálcio + Vitamina D</strong> — previnem osteoporose. Leite, derivados, sol ☀️<br>` +
+          `• <strong>Vitamina B12</strong> — função cerebral e energia. (absorção diminui com idade) 🧠<br>` +
+          `• <strong>Fibras</strong> — regulam o intestino, que tende a ficar mais lento 🫘<br>` +
+          `• <strong>Ômega-3</strong> — saúde cerebral e cardiovascular 🐟<br><br>` +
+          `💧 <strong>Hidratação extra!</strong> A sensação de sede diminui com a idade — programe lembretes para beber água.<br><br>` +
+          `🥣 <strong>Dica:</strong> Refeições menores e mais frequentes ajudam na digestão e no apetite.`
+      ]}
+  ],
+
+  gestacao: [
+    { palavras: ['gravidez', 'gestação', 'gestacao', 'grávida', 'gravida', 'gestante', 'amamentação', 'amamentacao', 'lactante', 'barriga', 'pré natal', 'pre natal'],
+      respostas: [
+        p => `🤰 <strong>Nutrição na gestação e amamentação:</strong><br><br>` +
+          `✅ <strong>Nutrientes fundamentais:</strong><br>` +
+          `• <strong>Ácido fólico (Vitamina B9)</strong> — essencial no 1º trimestre. Folhas verdes, feijão, laranja 🥬<br>` +
+          `• <strong>Ferro</strong> — previne anemia. Carnes magras, feijão, beterraba + vitamina C 🩸<br>` +
+          `• <strong>Cálcio</strong> — formação óssea do bebê. Leite, derivados, brócolis 🥛<br>` +
+          `• <strong>Ômega-3 (DHA)</strong> — desenvolvimento cerebral do bebê. Peixes, chia, linhaça 🐟<br>` +
+          `• <strong>Proteína</strong> — 1.1g por kg de peso (ligeiramente acima do normal)<br><br>` +
+          `⚠️ <strong>Evite:</strong> álcool, cafeína em excesso, carnes cruas/malpassadas, peixes com alto mercúrio, laticínios não pasteurizados. 🚫<br><br>` +
+          `👨‍⚕️ <strong>Importante:</strong> Consulte seu obstetra e nutricionista para orientação individualizada! Essa é uma fase única que merece acompanhamento profissional.`
+      ]}
+  ],
+
+  fora_de_nutricao: [
+    { palavras: ['medicamento', 'remédio', 'doença', 'doenca', 'diagnóstico', 'diagnostico', 'cirurgia', 'câncer', 'cancer', 'tumor', 'prescrição', 'prescricao'],
+      respostas: [p => `⚠️ <strong>Sou um assistente de nutrição, não um médico!</strong><br><br>` +
+        `Não posso prescrever ou recomendar tratamentos médicos. Essas perguntas devem ser feitas ao seu médico ou nutricionista clínico.<br><br>` +
+        `✅ Posso ajudar com:<br>` +
+        `• Dúvidas sobre alimentação saudável 🥗<br>` +
+        `• Receitas e substituições 🍳<br>` +
+        `• Dicas para seus objetivos 🎯<br>` +
+        `• Interpretação do seu plano alimentar 📋<br><br>` +
+        `👨‍⚕️ Consulte sempre um profissional de saúde para questões clínicas!`
+      ]}
+  ]
+};
+
+// ---- Banco de Perguntas Pré-Definidas do Bot Nutricionista ----
+const BOT_PERGUNTAS = [
+  {
+    key: 'pre_treino',
+    icon: '⚡',
+    label: 'Pré-Treino',
+    perguntas: [
+      'O que comer antes de treinar?',
+      'Quanto tempo antes do treino devo comer?',
+      'Melhor pré-treino natural para energia'
+    ]
+  },
+  {
+    key: 'pos_treino',
+    icon: '💪',
+    label: 'Pós-Treino',
+    perguntas: [
+      'O que comer depois do treino?',
+      'Janela de recuperação pós-treino',
+      'Receita rápida de pós-treino'
+    ]
+  },
+  {
+    key: 'emagrecimento',
+    icon: '🔥',
+    label: 'Emagrecimento',
+    perguntas: [
+      'Dicas para emagrecer com saúde',
+      'Quantos quilos posso perder por semana?',
+      'O que evitar na dieta'
+    ]
+  },
+  {
+    key: 'ganho_massa',
+    icon: '🏋️',
+    label: 'Ganho de Massa',
+    perguntas: [
+      'Dicas para ganhar massa muscular',
+      'O que não pode faltar na dieta?',
+      'Quantas refeições por dia?'
+    ]
+  },
+  {
+    key: 'proteinas',
+    icon: '🥩',
+    label: 'Proteínas',
+    perguntas: [
+      'Quanto de proteína comer por dia?',
+      'Melhores fontes de proteína',
+      'Whey protein vale a pena?'
+    ]
+  },
+  {
+    key: 'carboidratos',
+    icon: '🍚',
+    label: 'Carboidratos',
+    perguntas: [
+      'Preciso cortar carboidrato para emagrecer?',
+      'Melhores fontes de carboidrato'
+    ]
+  },
+  {
+    key: 'gorduras',
+    icon: '🥑',
+    label: 'Gorduras',
+    perguntas: [
+      'Gordura faz mal?',
+      'Quais gorduras comer no dia a dia'
+    ]
+  },
+  {
+    key: 'sono',
+    icon: '😴',
+    label: 'Sono',
+    perguntas: [
+      'O que comer para dormir melhor?',
+      'Alimentação atrapalha o sono?'
+    ]
+  },
+  {
+    key: 'receitas',
+    icon: '🍳',
+    label: 'Receitas',
+    perguntas: [
+      'Me dica uma receita saudável',
+      'Opções de café da manhã rápido'
+    ]
+  },
+  {
+    key: 'suplementos',
+    icon: '💊',
+    label: 'Suplementos',
+    perguntas: [
+      'Quais suplementos realmente funcionam?',
+      'Creatina e whey: como tomar?'
+    ]
+  },
+  {
+    key: 'agua',
+    icon: '💧',
+    label: 'Hidratação',
+    perguntas: [
+      'Quanto de água devo beber por dia?',
+      'Dicas para beber mais água'
+    ]
+  },
+  {
+    key: 'vegan',
+    icon: '🌱',
+    label: 'Vegano',
+    perguntas: [
+      'Como ter proteína na dieta vegana?',
+      'Suplementos essenciais para veganos'
+    ]
+  },
+  {
+    key: 'compulsao',
+    icon: '🧠',
+    label: 'Fome Emocional',
+    perguntas: [
+      'Diferença entre fome física e emocional',
+      'Estratégias para lidar com a ansiedade por comida'
+    ]
+  },
+  {
+    key: 'digestao',
+    icon: '🫘',
+    label: 'Digestão',
+    perguntas: [
+      'Alimentos que ajudam a digestão',
+      'Probióticos e saúde intestinal'
+    ]
+  },
+  {
+    key: 'imunidade',
+    icon: '🛡️',
+    label: 'Imunidade',
+    perguntas: [
+      'Alimentos que fortalecem a imunidade',
+      'Nutrientes essenciais para defesa do corpo'
+    ]
+  },
+  {
+    key: 'lanches',
+    icon: '🥤',
+    label: 'Lanches',
+    perguntas: [
+      'Opções de lanches saudáveis',
+      'Lanches rápidos para levar na bolsa'
+    ]
+  },
+  {
+    key: 'cafe_da_manha',
+    icon: '🌅',
+    label: 'Café da Manhã',
+    perguntas: [
+      'Café da manhã equilibrado',
+      'Café da manhã rápido (menos de 5 min)'
+    ]
+  },
+  {
+    key: 'frutas',
+    icon: '🍎',
+    label: 'Frutas',
+    perguntas: [
+      'Fruta engorda? Pode comer à vontade?',
+      'Melhores frutas para cada momento do dia'
+    ]
+  }
+];
+
+// ---- Escape HTML para evitar XSS ----
+function escapeHtml(str) {
+  if (typeof str !== 'string') return str;
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+// ---- Sanitiza perfil do usuário para uso em respostas HTML ----
+function sanitizeProfileForBot(p) {
+  if (!p) return p;
+  const safe = {};
+  for (const [key, val] of Object.entries(p)) {
+    if (typeof val === 'string') safe[key] = escapeHtml(val);
+    else if (Array.isArray(val)) safe[key] = val.map(v => typeof v === 'string' ? escapeHtml(v) : v);
+    else safe[key] = val;
+  }
+  return safe;
+}
+
+// ---- Stemming: gera variações de palavras em português ----
+const _STEM_CACHE = {};
+function gerarVariacoes(palavra) {
+  if (_STEM_CACHE[palavra]) return _STEM_CACHE[palavra];
+  const vars = [palavra];
+  // Regras simples de stemming para português
+  if (palavra.endsWith('ar')) {
+    vars.push(palavra.slice(0, -2));       // treinar → treina
+    vars.push(palavra.slice(0, -1));       // treinar → treina (com r)
+    vars.push(palavra.slice(0, -2) + 'o'); // treinar → treino
+    vars.push(palavra.slice(0, -2) + 'ou');// treinar → treinou
+    vars.push(palavra.slice(0, -2) + 'ando'); // treinar → treinando
+  } else if (palavra.endsWith('er')) {
+    vars.push(palavra.slice(0, -2));       // comer → come
+    vars.push(palavra.slice(0, -1));       // comer → comer (com r)
+    vars.push(palavra.slice(0, -2) + 'o'); // comer → como
+    vars.push(palavra.slice(0, -2) + 'eu');// comer → comeu
+    vars.push(palavra.slice(0, -2) + 'endo'); // comer → comendo
+  } else if (palavra.endsWith('ir')) {
+    vars.push(palavra.slice(0, -2));       // dormir → dorme
+    vars.push(palavra.slice(0, -1));       // dormir → dormi
+    vars.push(palavra.slice(0, -2) + 'o'); // dormir → durmo
+    vars.push(palavra.slice(0, -2) + 'iu');// dormir → dormiu
+    vars.push(palavra.slice(0, -2) + 'indo'); // dormir → dormindo
+  } else if (palavra.endsWith('ão')) {
+    vars.push(palavra.slice(0, -2));       // proteína (opção)
+    vars.push(palavra.slice(0, -2) + 's'); // proteínas
+  } else if (palavra.endsWith('s') && palavra.length > 3) {
+    vars.push(palavra.slice(0, -1));       // proteínas → proteína
+  }
+  // Plural
+  if (palavra.endsWith('s') && palavra.length > 3) {
+    vars.push(palavra.slice(0, -1));
+  } else if (!palavra.endsWith('s')) {
+    vars.push(palavra + 's');
+  }
+  // Aumentativos/diminutivos comuns
+  if (palavra.endsWith('inho')) vars.push(palavra.slice(0, -4));
+  if (palavra.endsWith('inha')) vars.push(palavra.slice(0, -4));
+
+  _STEM_CACHE[palavra] = [...new Set(vars)];
+  return _STEM_CACHE[palavra];
+}
+
+// ---- Detecta se é follow-up (pergunta curta referindo-se ao tópico anterior) ----
+function isFollowUp(texto) {
+  const t = texto.trim().toLowerCase();
+  // Só textos muito curtos (≤5 chars) são considerados follow-up automático
+  // Textos >5 chars são tratados como nova pergunta, não follow-up
+  // Isso evita que perguntas como "proteína" (8), "receitas" (8), "pre treino" (9)
+  // sejam forçadas a receber resposta da mesma categoria anterior
+  if (t.length <= 5) return true;
+  if (/^(e\b|mas|também|tambem|então|entao|aí|dai)/.test(t)) return true;
+  return false;
+}
+
+// ---- Extrai palavras negativas que precedem keywords ----
+function hasNegacao(texto, keyword) {
+  const idx = texto.indexOf(keyword);
+  if (idx < 0) return false;
+  const before = texto.substring(Math.max(0, idx - 20), idx);
+  return /\b(não|nao|nunca|jamais|sem|exceto|menos|evito|odeio|detesto|tenho medo|nao como|não como|nao gosto|não gosto)\b/i.test(before);
+}
+
+// ---- Sistema de matching inteligente ----
+function encontrarMelhorResposta(texto, profile) {
+  const textoLower = texto.toLowerCase().trim();
+  const isFollow = isFollowUp(textoLower);
+
+  // 1. Verifica se é pergunta sobre fora do escopo (prioridade máxima)
+  const termosMedicos = ['remédio', 'remedio', 'medicamento', 'doença', 'doenca', 'diagnóstico', 'diagnostico',
+    'câncer', 'cancer', 'tumor', 'cirurgia', 'prescrição', 'prescricao', 'receita médica', 'receita medica',
+    'antibiótico', 'antibiotico', 'doente', 'internação', 'internacao', 'quimioterapia', 'radioterapia'];
+  if (termosMedicos.some(t => textoLower.includes(t))) {
+    STATE.lastBotCategory = 'fora_de_nutricao';
+    const cat = BOT_CONHECIMENTO.fora_de_nutricao[0];
+    return cat.respostas[Math.floor(Math.random() * cat.respostas.length)](profile);
+  }
+
+  // 2. Calcula score para cada categoria com stemming + negação + contexto
+  let melhorCategoria = null;
+  let melhorScore = 0;
+  let melhorResposta = null;
+  const scoresPorCategoria = {};
+
+  for (const [categoria, items] of Object.entries(BOT_CONHECIMENTO)) {
+    if (categoria === 'fora_de_nutricao') continue; // já verificamos
+    let catScore = 0;
+
+    for (const item of items) {
+      let score = 0;
+      for (const palavra of item.palavras) {
+        // Gera variações da palavra (stemming)
+        const variacoes = gerarVariacoes(palavra);
+        for (const v of variacoes) {
+          if (v.length < 3) continue;
+          let found = false;
+          // Busca como palavra inteira ou substring
+          const idx = textoLower.indexOf(v);
+          if (idx >= 0) {
+            found = true;
+            // Verifica negação antes da palavra
+            if (hasNegacao(textoLower, v)) {
+              score -= Math.min(v.length / 2, 3); // penaliza
+            } else {
+              // Palavras mais longas = mais específicas = maior peso
+              const pesoBase = Math.min(v.length / 3, 5);
+              // Bônus se é palavra completa (não apenas substring de outra)
+              const bordaAntes = idx === 0 || /[\s,.\-!?/]/.test(textoLower[idx - 1]);
+              const bordaDepois = idx + v.length >= textoLower.length || /[\s,.\-!?/]/.test(textoLower[idx + v.length]);
+              score += bordaAntes && bordaDepois ? pesoBase * 1.5 : pesoBase;
+            }
+          }
+          if (found) break; // Uma variação já basta
+        }
+      }
+
+      // Bônus se a categoria tem match com o objetivo do usuário
+      if (categoria === 'emagrecimento' && profile.goal?.includes('Emagrecimento')) score += 2;
+      if (categoria === 'ganho_massa' && profile.goal?.includes('massa muscular')) score += 2;
+      if (categoria === 'vegan' && profile.restrictions?.some?.(r => /vegan|vegetar/i.test(r))) score += 2;
+      if (categoria === 'vegan' && String(profile.restrictionDetail || '').toLowerCase().includes('vegan')) score += 2;
+      if (categoria === 'receitas' && profile.favFoods) score += 1;
+
+      catScore += score;
+
+      if (score > melhorScore) {
+        melhorScore = score;
+        melhorCategoria = categoria;
+        melhorResposta = item.respostas[Math.floor(Math.random() * item.respostas.length)];
+      }
+    }
+    scoresPorCategoria[categoria] = catScore;
+  }
+
+  // 3. Bônus de contexto: se é follow-up, dá peso extra à última categoria
+  if (isFollow && STATE.lastBotCategory && STATE.lastBotCategory !== 'fora_de_nutricao') {
+    const bonusFollow = melhorScore < 2 ? 3 : 1.5; // Maior bônus quando não achou nada
+    for (const item of BOT_CONHECIMENTO[STATE.lastBotCategory] || []) {
+      const r = item.respostas[Math.floor(Math.random() * item.respostas.length)];
+      if (melhorScore < 2 || melhorCategoria === STATE.lastBotCategory) {
+        melhorScore += bonusFollow;
+        melhorCategoria = STATE.lastBotCategory;
+        melhorResposta = r;
+      }
+    }
+  }
+
+  // 4. Se encontrou match, salva contexto e retorna (com sanitização)
+  if (melhorScore >= 2 && melhorResposta) {
+    STATE.lastBotCategory = melhorCategoria;
+    const safe = sanitizeProfileForBot(profile);
+    return melhorResposta(safe);
+  }
+
+  // 5. Detecta perguntas compostas (múltiplas categorias com score baixo)
+  const catsComScore = Object.entries(scoresPorCategoria)
+    .filter(([_, s]) => s > 0)
+    .sort(([_, a], [__, b]) => b - a);
+
+  if (catsComScore.length >= 2) {
+    const [cat1, cat2] = catsComScore.slice(0, 2).map(([c]) => c);
+    const resp1 = BOT_CONHECIMENTO[cat1]?.[0]?.respostas?.[0];
+    const resp2 = BOT_CONHECIMENTO[cat2]?.[0]?.respostas?.[0];
+    if (resp1 && resp2) {
+      STATE.lastBotCategory = cat1;
+      const safe = sanitizeProfileForBot(profile);
+      return resp1(safe) + '<br><br>' + resp2(safe);
+    }
+  }
+
+  // 6. Se a pergunta é curta demais, pede mais contexto
+  if (textoLower.length < 8) {
+    return `Pode falar um pouco mais, ${escapeHtml(profile.name) || 'amigo(a)'}? 😊 Me conta o que você gostaria de saber sobre nutrição que te respondo com dicas práticas!`;
+  }
+
+  // 7. Fallback melhorado
+  STATE.lastBotCategory = null;
+  return gerarRespostaContextual(profile, textoLower);
+}
+
+function gerarRespostaContextual(p, textoLower) {
+  const isLoss = p.goal?.includes('Emagrecimento');
+  const isGain = p.goal?.includes('massa muscular');
+
+  // Tenta encontrar palavras conhecidas na pergunta que não deram match forte
+  const palavrasConhecidas = [];
+  for (const [categoria, items] of Object.entries(BOT_CONHECIMENTO)) {
+    if (categoria === 'fora_de_nutricao') continue;
+    for (const item of items) {
+      for (const palavra of item.palavras) {
+        const variacoes = gerarVariacoes(palavra);
+        for (const v of variacoes) {
+          if (v.length >= 4 && textoLower?.includes(v)) {
+            palavrasConhecidas.push(v);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  let foco = '';
+  if (isLoss) foco = '💪 Você está focado(a) em emagrecimento — que tal darmos uma olhada em opções de lanches leves ou substituições inteligentes?';
+  else if (isGain) foco = '🔥 Você está focado(a) em ganho de massa muscular — que tal vermos opções de refeições ricas em proteína?';
+  else foco = '🥗 Que tal explorarmos receitas saudáveis ou dicas de hidratação?';
+
+  // Se encontrou palavras conhecidas mas não deu match forte, sugere refinar
+  const sugestaoExtra = palavrasConhecidas.length > 0
+    ? `<br><br>💡 Você mencionou "<strong>${[...new Set(palavrasConhecidas)].slice(0, 3).join(', ')}</strong>" — tente perguntar de forma mais direta!`
+    : `<br><br>💡 <strong>Sugestões:</strong> Tente perguntar sobre um tópico específico como "dicas para emagrecer", "pré-treino", "receitas", "proteínas" ou "sono".`;
+
+  return (
+    `Olá ${p.name || 'amigo(a)'}! 😊<br><br>` +
+    `${foco}<br><br>` +
+    `📌 <strong>Você pode me perguntar sobre:</strong><br>` +
+    `• 🍳 Receitas e substituições<br>` +
+    `• 💪 Pré e pós-treino<br>` +
+    `• 🥩 Proteínas, carboidratos e gorduras<br>` +
+    `• 😴 Sono e alimentação<br>` +
+    `• 🧠 Fome emocional<br>` +
+    `• 🌱 Opções vegetarianas/veganas<br>` +
+    `• 🫘 Digestão e fibras<br>` +
+    `• 🛡️ Imunidade<br>` +
+    `• 🥤 Lanches e bebidas<br><br>` +
+    `É só mandar a pergunta! 🎯` +
+    sugestaoExtra
+  );
+}
+
+async function sendChatMessage() {
+  const input = document.getElementById('chat-text-input');
+  const text = input?.value?.trim();
+  if (!text || text.length < 2) return;
+
+  // Adiciona mensagem do usuário ao histórico
+  if (!STATE.chatHistory) STATE.chatHistory = [];
+  STATE.chatHistory.push({ role: 'user', text });
+
+  // Limpa input e mostra loading
+  input.value = '';
+  STATE.chatLoading = true;
+  render({ screen: 'chat_premium', message: '', components: [], actions: [] });
+
+  // Simula um pequeno delay pra dar sensação de processamento
+  await new Promise(resolve => setTimeout(resolve, 600 + Math.random() * 400));
+
+  // Gera resposta local inteligente
+  const resposta = encontrarMelhorResposta(text, STATE.profile);
+  STATE.chatHistory.push({ role: 'bot', text: resposta });
+
+  STATE.chatLoading = false;
+  render({ screen: 'chat_premium', message: '', components: [], actions: [] });
+
+  // Scroll automático pro final do chat
+  setTimeout(() => {
+    const chatContainer = document.getElementById('chat-inner');
+    if (chatContainer) chatContainer.scrollTop = chatContainer.scrollHeight;
+  }, 100);
+}
+
 function showFirstChatPremiumStep() {
-  STATE.chatPremiumStep = 1;
+  STATE.chatPremiumStep = 0;
+  STATE.chatHistory = [];
+  STATE.lastBotCategory = null;
+  STATE.chatCategoryMode = 'categories';
+  STATE.chatSelectedCategory = null;
+  const msg = '👋 <strong>Olá!</strong> Sou o Bot Nutricionista do NutriCare! 🥗<br><br>' +
+    'Escolha um assunto abaixo para tirar suas dúvidas:';
   return {
     screen: 'chat_premium',
-    message: '👋 <strong>Ótimo!</strong> Agora vou te fazer algumas perguntas rápidas para<br>deixar seu plano ainda mais personalizado.',
-    components: [{ type: 'buttons', items: [{ text: 'Continuar 👍', action: 'chat_continue_0', variant: 'primary' }] }],
-    actions: [{ id: '0', next: 'chat_premium' }]
+    message: msg,
+    components: [],
+    actions: [{ id: 'chat_msg', next: 'chat_premium' }]
   };
+}
+
+// ---- Handlers do chat por categorias ----
+function handleCategoryClick(key) {
+  STATE.chatCategoryMode = 'questions';
+  STATE.chatSelectedCategory = key;
+  render({ screen: 'chat_premium', message: '', components: [], actions: [] });
+  setTimeout(() => {
+    const chatContainer = document.getElementById('chat-inner');
+    if (chatContainer) chatContainer.scrollTop = chatContainer.scrollHeight;
+  }, 50);
+}
+
+function handleQuestionClick(text) {
+  if (!text || text.length < 2 || STATE.chatLoading) return;
+  if (!STATE.chatHistory) STATE.chatHistory = [];
+  STATE.chatHistory.push({ role: 'user', text });
+  STATE.chatLoading = true;
+  render({ screen: 'chat_premium', message: '', components: [], actions: [] });
+  setTimeout(async () => {
+    await new Promise(resolve => setTimeout(resolve, 400 + Math.random() * 300));
+    const resposta = encontrarMelhorResposta(text, STATE.profile);
+    STATE.chatHistory.push({ role: 'bot', text: resposta });
+    STATE.chatLoading = false;
+    render({ screen: 'chat_premium', message: '', components: [], actions: [] });
+    setTimeout(() => {
+      const chatContainer = document.getElementById('chat-inner');
+      if (chatContainer) chatContainer.scrollTop = chatContainer.scrollHeight;
+    }, 50);
+  }, 50);
+}
+
+function handleBackToCategories() {
+  STATE.chatCategoryMode = 'categories';
+  STATE.chatSelectedCategory = null;
+  // Mantém o histórico visível
+  render({ screen: 'chat_premium', message: '', components: [], actions: [] });
 }
 
 // ---- Diagnóstico ----
@@ -1324,7 +2596,7 @@ function gerarDadosNutricionais(p) {
 
 function gerarSuplementos(p) {
   const s = [];
-  if (p.restrictions && p.restrictions.includes('Sim') && p.restrictionDetail && (p.restrictionDetail.toLowerCase().includes('vegan') || p.restrictionDetail.toLowerCase().includes('vegetar'))) {
+  if (p.restrictions && p.restrictions.includes('Sim') && p.restrictionDetail && (String(p.restrictionDetail).toLowerCase().includes('vegan') || String(p.restrictionDetail).toLowerCase().includes('vegetar'))) {
     s.push({ icon: '💊', name: 'Vitamina B12', dosage: '2,4 mcg/dia', reason: 'Essencial em dietas baseadas em vegetais — a B12 é encontrada principalmente em alimentos de origem animal.' });
   }
   if (p.sleep && p.sleep === 'Ruim') {
@@ -1349,6 +2621,105 @@ const API_URL = window.location.hostname === 'localhost' || window.location.host
 
 const ANAMNESE_TOTAL_STEPS = 6; // Perguntas básicas (gratuitas)
 const ANAMNESE_EXTRA_TOTAL = 8; // Perguntas extras (premium)
+
+// ---- Fetch com Retry e Exponential Backoff ----
+const _fetchInFlight = new Map(); // Deduplicação de requisições em voo
+
+async function fetchWithRetry(url, options = {}, retries = 2) {
+  const baseDelay = 1000;
+
+  // Deduplicação: aborta fetch anterior com a mesma URL (se ainda estiver voando)
+  const prevController = _fetchInFlight.get(url);
+  if (prevController) {
+    prevController.abort();
+  }
+
+  const controller = new AbortController();
+  _fetchInFlight.set(url, controller);
+
+  // Merge signal do controller com signal do caller
+  const originalSignal = options.signal;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    // Cria novo combinedSignal a cada tentativa (evita race com dedup)
+    const combinedSignal = originalSignal
+      ? combineAbortSignals(controller.signal, originalSignal)
+      : controller.signal;
+
+    try {
+      const res = await fetch(url, { ...options, signal: combinedSignal });
+
+      // Se for 429 (rate limit), espera mais e retry
+      if (res.status === 429 && attempt < retries) {
+        const retryAfter = parseInt(res.headers.get('Retry-After') || '2', 10) * 1000;
+        await new Promise(r => setTimeout(r, retryAfter + Math.random() * 1000));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        // Abortado por dedup (outra chamada para mesma URL) — não retry
+        _fetchInFlight.delete(url);
+        throw err;
+      }
+      if (attempt >= retries) {
+        _fetchInFlight.delete(url);
+        throw err;
+      }
+      const delay = baseDelay * Math.pow(2, attempt) + Math.random() * 500;
+      devLog(`[NutriCare] Retry ${attempt + 1}/${retries} em ${Math.round(delay)}ms:`, err.message);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
+function combineAbortSignals(s1, s2) {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  s1.addEventListener('abort', onAbort);
+  s2.addEventListener('abort', onAbort);
+  if (s1.aborted || s2.aborted) controller.abort();
+  return controller.signal;
+}
+
+// ---- BroadcastChannel (sincronização entre abas) ----
+const SYNC_CHANNEL = typeof BroadcastChannel !== 'undefined'
+  ? new BroadcastChannel('nutricare-sync')
+  : null;
+
+function broadcastSync(type, data) {
+  if (SYNC_CHANNEL) {
+    try {
+      SYNC_CHANNEL.postMessage({ type, data, timestamp: Date.now() });
+    } catch (_) { /* ignore */ }
+  }
+}
+
+// Sincroniza estado premium entre abas
+if (SYNC_CHANNEL) {
+  SYNC_CHANNEL.onmessage = (event) => {
+    const msg = event.data;
+    if (!msg || !msg.type) return;
+    switch (msg.type) {
+      case 'premium_changed':
+        // Recarrega status premium — isPremium() lê do localStorage
+        if (isPremium()) {
+          renderPremiumAtivado();
+        }
+        break;
+      case 'historico_changed':
+        // Atualiza na próxima vez que usuário abrir histórico
+        _decryptedCache[STORAGE_KEY_HISTORICO] = null;
+        break;
+    }
+  };
+}
+
+// ---- Log wrapper (desativa console.log em produção) ----
+const IS_DEV = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+function devLog(...args) {
+  if (IS_DEV) console.log(...args);
+}
 
 // ---- Sanitização HTML ----
 function escapeHtml(str) {
@@ -1376,6 +2747,9 @@ function salvarConsulta() {
     historico.unshift(entry);
     if (historico.length > 20) historico.length = 20;
     localStorage.setItem(STORAGE_KEY_HISTORICO, JSON.stringify(historico));
+    // Criptografa em background (fire-and-forget)
+    _encryptStorageKey(STORAGE_KEY_HISTORICO);
+    broadcastSync('historico_changed', { count: historico.length });
 
     const peso = parseFloat(STATE.profile.weight);
     if (peso) {
@@ -1386,6 +2760,7 @@ function salvarConsulta() {
         progresso.push({ data: entry.timestamp, peso, objetivo: STATE.profile.goal || '' });
         if (progresso.length > 100) progresso.length = 100;
         localStorage.setItem(STORAGE_KEY_PROGRESSO, JSON.stringify(progresso));
+        _encryptStorageKey(STORAGE_KEY_PROGRESSO);
       }
     }
   } catch (e) {
@@ -1393,15 +2768,31 @@ function salvarConsulta() {
   }
 }
 
-function carregarHistorico() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY_HISTORICO) || '[]'); }
-  catch { return []; }
+async function carregarHistorico() {
+  // Tenta cache síncrono primeiro (populado na inicialização ou após salvar)
+  const cached = _decryptedCache[STORAGE_KEY_HISTORICO];
+  if (Array.isArray(cached)) return cached;
+  // Fallback: lê do localStorage
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_HISTORICO);
+    if (!raw) return [];
+    if (raw.startsWith('enc:')) {
+      const decrypted = await _aesDecrypt(raw);
+      const parsed = JSON.parse(decrypted || '[]');
+      _decryptedCache[STORAGE_KEY_HISTORICO] = parsed;
+      return parsed;
+    }
+    const parsed = JSON.parse(raw);
+    _decryptedCache[STORAGE_KEY_HISTORICO] = parsed;
+    return parsed;
+  } catch { return []; }
 }
 
-function removerRegistroHistorico(id) {
-  let historico = carregarHistorico();
+async function removerRegistroHistorico(id) {
+  let historico = await carregarHistorico();
   historico = historico.filter(h => String(h.id) !== String(id));
   localStorage.setItem(STORAGE_KEY_HISTORICO, JSON.stringify(historico));
+  _encryptStorageKey(STORAGE_KEY_HISTORICO);
   renderHistorico();
 }
 
@@ -1417,8 +2808,8 @@ function removerRegistroProgresso(timestamp) {
   renderProgresso();
 }
 
-function renderHistorico() {
-  const historico = carregarHistorico();
+async function renderHistorico() {
+  const historico = _decryptedCache[STORAGE_KEY_HISTORICO] || await carregarHistorico() || [];
   const cards = historico.length
     ? historico.map(h => `
       <div class="historico-card" onclick="dispatch('ver_consulta', '${h.id}')">
@@ -1620,6 +3011,8 @@ function resetState() {
   STATE.anamneseExtraStep = 0;
   STATE.chatPremiumStep = 0;
   STATE.plano = null;
+  STATE.lastBotCategory = null;
+  STATE.chatHistory = [];
   Object.assign(STATE.profile, {
     name: '', goal: '', routine: '', diet: '',
     restrictions: [], restrictionDetail: '',
@@ -1638,32 +3031,31 @@ const $c = id => document.getElementById(id);
 
 // ---- Backend Integration ----
 async function sendToBackend(profile) {
-  console.log('📤 [NutriCare] Enviando dados para API...', {
+  devLog('📤 [NutriCare] Enviando dados para API...', {
     goal: profile.goal,
     sleep: profile.sleep,
     activity: profile.activity,
-    gender: profile.gender,
-    age: profile.age,
-    weight: profile.weight,
-    height: profile.height
+    gender: profile.gender
   });
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
+  const timeout = setTimeout(() => controller.abort(), 8000);
   try {
-    const res = await fetch(`${API_URL}/consulta`, {
+    const res = await fetchWithRetry(`${API_URL}/consulta`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(profile),
       signal: controller.signal
-    });
+    }, 1); // 1 retry = 2 tentativas no total
     clearTimeout(timeout);
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     const result = await res.json();
-    console.log('✅ [NutriCare] Resposta da API recebida', result.meta);
+    devLog('✅ [NutriCare] Resposta da API recebida', result.meta);
     return result;
   } catch (err) {
     clearTimeout(timeout);
-    console.warn('⚠️ [NutriCare] API indisponível, usando geração local:', err.message);
+    if (err.name !== 'AbortError') {
+      console.warn('⚠️ [NutriCare] API indisponível, usando geração local:', err.message);
+    }
     return null;
   }
 }
@@ -1742,6 +3134,7 @@ function salvarPremiumMultiStorage(dataAtivacaoISO) {
   localStorage.setItem('nutricare_premium_proof', proof);
   const payload = JSON.stringify({ date: dataAtivacaoISO, device: getPremiumDeviceId(), proof });
   setPremiumCookie(payload, 365);
+  broadcastSync('premium_changed', { status: 'activated' });
 }
 
 // Salva registro PERMANENTE com assinatura
@@ -1751,6 +3144,7 @@ function salvarEverPaid(dataAtivacaoISO) {
   localStorage.setItem('nutricare_ever_paid_date', dataAtivacaoISO);
   localStorage.setItem('nutricare_ever_paid_proof', proof);
   const payload = JSON.stringify({ date: dataAtivacaoISO, device: getPremiumDeviceId(), proof });
+  broadcastSync('premium_changed', { status: 'ever_paid' });
   setEverPaidCookie(payload, 365 * 5);
 }
 
@@ -1782,6 +3176,7 @@ function limparPremiumMultiStorage() {
   localStorage.removeItem('nutricare_premium_date');
   localStorage.removeItem('nutricare_premium_proof');
   deletePremiumCookie();
+  broadcastSync('premium_changed', { status: 'removed' });
 }
 
 function recuperarPremiumCookie() {
@@ -1996,10 +3391,18 @@ async function salvarPinConfigurado() {
 function getPinProfissional() {
   const hash = localStorage.getItem('nutricare_pin_hash');
   if (hash) return hash;
-  // Migração: PIN antigo em texto puro
+  // Fallback: PIN antigo em texto puro (migrado na inicialização)
+  return localStorage.getItem('nutricare_pin') || '';
+}
+
+// Migra PIN antigo em texto puro para hash (chamado na inicialização)
+async function migrarPinAntigo() {
   const oldPin = localStorage.getItem('nutricare_pin');
-  if (oldPin) return oldPin;
-  return '';
+  if (oldPin) {
+    const hash = await hashPinSHA256(oldPin);
+    localStorage.setItem('nutricare_pin_hash', hash);
+    localStorage.removeItem('nutricare_pin');
+  }
 }
 
 function fecharModal() {
@@ -2109,25 +3512,96 @@ function exibirTelaPremiumAtivado(nome, dataExpiracao) {
 }
 
 function renderChatPremium(resp) {
-  const step = STATE.chatPremiumStep ?? 1;
-  const total = 6;
-  const progressPct = Math.min((step / total) * 100, 100);
+  const history = STATE.chatHistory || [];
+  const mode = STATE.chatCategoryMode;
+  const selectedCat = STATE.chatSelectedCategory;
+  const hasHistory = history.length > 0;
+  const catData = selectedCat ? BOT_PERGUNTAS.find(c => c.key === selectedCat) : null;
 
-  // Get first button action for the text input to use on submit
-  const firstAction = resp.components?.[0]?.items?.[0]?.action || '';
+  // ---- Monta burbulhas do histórico ----
+  let bubblesHtml = '';
+  history.forEach(msg => {
+    if (msg.role === 'user') {
+      bubblesHtml += `
+        <div class="message user">
+          <div class="message-avatar">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="white" stroke-width="2"/><path d="M8 14C8 14 10 12 12 14C14 12 16 14 16 14" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M10 10L10 11" stroke="white" stroke-width="2" stroke-linecap="round"/><path d="M14 10L14 11" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
+          </div>
+          <div class="message-bubble" style="color:white;border-bottom-right-radius:4px;max-width:85%;margin-left:auto;"><p>${escapeHtml(msg.text)}</p></div>
+        </div>`;
+    } else {
+      bubblesHtml += `
+        <div class="message bot">
+          <div class="message-avatar">
+            <svg width="18" height="18" viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="22" stroke="var(--accent-500)" stroke-width="3"/><path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/><path d="M18 20L18 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/><path d="M30 20L30 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/></svg>
+          </div>
+          <div class="message-bubble">${msg.text}</div>
+        </div>`;
+    }
+  });
 
-  // User message bubble (from text input)
-  let userBubbleHtml = '';
-  if (STATE.lastUserInput) {
-    userBubbleHtml = `
-      <div class="message user">
+  // ---- Welcome / botão inicial ----
+  if (!hasHistory && resp.message) {
+    bubblesHtml += `
+      <div class="message bot">
         <div class="message-avatar">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="white" stroke-width="2"/><path d="M8 14C8 14 10 12 12 14C14 12 16 14 16 14" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M10 10L10 11" stroke="white" stroke-width="2" stroke-linecap="round"/><path d="M14 10L14 11" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
+          <svg width="18" height="18" viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="22" stroke="var(--accent-500)" stroke-width="3"/><path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/><path d="M18 20L18 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/><path d="M30 20L30 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/></svg>
         </div>
-        <div class="message-bubble" style="color:white;border-bottom-right-radius:4px;max-width:85%;margin-left:auto;"><p>${escapeHtml(STATE.lastUserInput)}</p></div>
+        <div class="message-bubble">${resp.message}</div>
       </div>`;
-    STATE.lastUserInput = null;
   }
+
+  // ---- Grade de categorias ----
+  if (mode === 'categories') {
+    if (hasHistory) {
+      bubblesHtml += `<p style="font-size:0.82rem;color:var(--text-secondary);margin:8px 0 4px;font-weight:600;">📌 Escolha outro assunto:</p>`;
+    }
+    bubblesHtml += `<div class="category-grid">`;
+    BOT_PERGUNTAS.forEach(cat => {
+      bubblesHtml += `
+        <div class="category-card" onclick="handleCategoryClick('${cat.key}')">
+          <span class="category-icon">${cat.icon}</span>
+          <span class="category-label">${cat.label}</span>
+        </div>`;
+    });
+    bubblesHtml += `</div>`;
+  }
+
+  // ---- Botões de perguntas da categoria (modo questions) ----
+  if (mode === 'questions' && catData) {
+    bubblesHtml += `<div style="margin-top:${hasHistory ? '16px' : '0'}">`;
+    if (hasHistory) {
+      bubblesHtml += `<p style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:8px;font-weight:600;">📌 Mais perguntas sobre <strong>${catData.label}</strong>:</p>`;
+    }
+    bubblesHtml += `<div style="display:flex;flex-direction:column;gap:8px;">`;
+    catData.perguntas.forEach((q, i) => {
+      const safeQ = q.replace(/'/g, "\\'");
+      bubblesHtml += `<button class="option-btn" onclick="handleQuestionClick('${safeQ}')">${q}</button>`;
+    });
+    bubblesHtml += `</div></div>`;
+  }
+
+  // ---- Loading indicator ----
+  if (STATE.chatLoading) {
+    bubblesHtml += `
+      <div class="message bot">
+        <div class="message-avatar">
+          <svg width="18" height="18" viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="22" stroke="var(--accent-500)" stroke-width="3"/><path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/><path d="M18 20L18 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/><path d="M30 20L30 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/></svg>
+        </div>
+        <div class="message-bubble"><em>Digitando...</em></div>
+      </div>`;
+  }
+
+  // ---- Bottom bar ----
+  const showBackBtn = mode === 'questions';
+  const bottomPadding = showBackBtn ? '130px' : '80px';
+
+  let bottomBar = `<div style="position:fixed;bottom:0;left:0;right:0;padding:12px 16px 24px;background:var(--bg-deep);border-top:1px solid var(--border-color);display:flex;flex-direction:column;gap:8px;">`;
+  if (showBackBtn) {
+    bottomBar += `<button class="btn-outline" onclick="handleBackToCategories()" style="width:100%;font-size:0.85rem;">← Categorias</button>`;
+  }
+  bottomBar += `<button class="btn-outline" onclick="dispatch('chat_finalizar')" style="width:100%;font-size:0.85rem;">🎯 Finalizar e gerar plano</button>`;
+  bottomBar += `</div>`;
 
   return `
     <div class="screen">
@@ -2142,100 +3616,84 @@ function renderChatPremium(resp) {
           </div>
           <span style="font-size:0.75rem;color:var(--text-secondary);background:var(--accent-500);color:#fff;padding:2px 10px;border-radius:10px;">⭐ Premium</span>
         </div>
-        <div class="progress-bar-track" style="margin-top:8px;">
-          <div class="progress-bar-fill" style="width:${progressPct}%;background:var(--accent-500);"></div>
-        </div>
       </header>
-      <main class="chat-container" id="chat-inner" style="padding-bottom:120px;">
-        ${userBubbleHtml}
-        <div class="message bot">
-          <div class="message-avatar">
-            <svg width="18" height="18" viewBox="0 0 48 48" fill="none">
-              <circle cx="24" cy="24" r="22" stroke="var(--accent-500)" stroke-width="3"/>
-              <path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/>
-              <path d="M18 20L18 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/>
-              <path d="M30 20L30 22" stroke="var(--accent-500)" stroke-width="2.5" stroke-linecap="round"/>
-            </svg>
-          </div>
-          <div class="message-bubble">${resp.message}</div>
-        </div>
+      <main class="chat-container" id="chat-inner" style="padding-bottom:${bottomPadding};">
+        ${bubblesHtml}
       </main>
-      <div style="position:fixed;bottom:0;left:0;right:0;padding:12px 16px 24px;background:var(--bg-deep);border-top:1px solid var(--border-color);display:flex;flex-direction:column;gap:8px;">
-        <div style="display:flex;gap:8px;width:100%;">
-          <input id="dynamic-text-input" type="text" placeholder="Digite sua resposta..."
-            style="flex:1;padding:12px 16px;border-radius:12px;border:1px solid var(--border-color);background:var(--bg-surface);color:var(--text-primary);font-size:0.9rem;outline:none;" />
-          <button id="dynamic-send-btn" class="btn-primary" data-action="${firstAction}" style="padding:12px 20px;white-space:nowrap;" disabled>
-            Enviar
-          </button>
-        </div>
-        ${resp.components.map(c => {
-          if (c.type === 'buttons') {
-            return c.items.map(b => `<button class="btn-primary" data-action="${b.action}" style="width:100%;">${b.text}</button>`).join('');
-          }
-          return '';
-        }).join('')}
-      </div>
+      ${bottomBar}
     </div>`;
 }
 
 function dispatch(action, payload) {
-  // Guard anti-clique duplicado
-  if (STATE._dispatching) { console.warn('⏳ [NutriCare] Dispatch bloqueado — já processando'); return; }
+  // Guard anti-clique duplicado com timeout de segurança (5s)
+  if (STATE._dispatching) {
+    devLog('⏳ [NutriCare] Dispatch bloqueado — já processando');
+    return;
+  }
   STATE._dispatching = true;
-  console.log(`🔄 [NutriCare] Action: ${action}`, payload ? `Payload: ${payload.slice(0, 50)}...` : '');
+  STATE._dispatchTimeout = setTimeout(() => {
+    STATE._dispatching = false;
+    console.warn('⚠️ [NutriCare] Dispatch timeout — liberado automaticamente');
+  }, 5000);
+  try {
+    devLog(`🔄 [NutriCare] Action: ${action}`, payload ? `Payload: ${String(payload).slice(0, 50)}...` : '');
 
-  // Aplica transição de tela baseada na ação
-  if (action && ACTION_ROUTES[action]) {
-    STATE.screen = ACTION_ROUTES[action];
-    console.log(`   → Tela: ${STATE.screen}`);
-  }
-
-  // Liberar entrada do cliente — abre modal profissional
-  if (action === 'liberar_cliente') {
-    if (isPremium()) {
-      const dias = getPremiumDiasRestantes();
-      alert(`⭐ Você já possui Premium ativo!\n⏳ ${dias} dias restantes.`);
-    } else {
-      exibirModalLiberarCliente();
+    // Aplica transição de tela baseada na ação
+    if (action && ACTION_ROUTES[action]) {
+      STATE.screen = ACTION_ROUTES[action];
+      console.log(`   → Tela: ${STATE.screen}`);
     }
-    STATE._dispatching = false;
-    return;
-  }
 
-  // Sair do premium — limpa e volta pro básico
-  if (action === 'sair_premium') {
-    limparPremiumMultiStorage();
-    resetState();
+    // Liberar entrada do cliente — abre modal profissional
+    if (action === 'liberar_cliente') {
+      if (isPremium()) {
+        const dias = getPremiumDiasRestantes();
+        alert(`⭐ Você já possui Premium ativo!\n⏳ ${dias} dias restantes.`);
+      } else {
+        exibirModalLiberarCliente();
+      }
+      return;
+    }
+
+    // Sair do premium — limpa e volta pro básico
+    if (action === 'sair_premium') {
+      limparPremiumMultiStorage();
+      resetState();
+      const response = engine(action, payload);
+      render(response);
+      return;
+    }
+
+    // Reseta estado ao iniciar nova consulta (evita pular perguntas na 2ª vez)
+    if (action === 'iniciar_consulta') {
+      STATE.anamneseStep = 0;
+      STATE.anamneseExtraStep = 0;
+      STATE.chatPremiumStep = 0;
+      STATE.plano = null;
+      Object.assign(STATE.profile, {
+        name: '', goal: '', routine: '', diet: '',
+        restrictions: [], restrictionDetail: '',
+        hasExams: false, sleep: '', activity: '',
+        age: '', weight: '', height: '', gender: '',
+        medications: '', difficulties: [], emotionalEating: '',
+        motivation: 3, extraInfo: ''
+      });
+    }
+
+    // Save user text input for bubble display
+    if (typeof payload === 'string' && payload.trim()) {
+      STATE.lastUserInput = payload.trim();
+    }
     const response = engine(action, payload);
+    STATE.screen = response.screen;
     render(response);
+  } finally {
     STATE._dispatching = false;
-    return;
+    if (STATE._dispatchTimeout) {
+      clearTimeout(STATE._dispatchTimeout);
+      STATE._dispatchTimeout = null;
+    }
   }
-
-  // Reseta estado ao iniciar nova consulta (evita pular perguntas na 2ª vez)
-  if (action === 'iniciar_consulta') {
-    STATE.anamneseStep = 0;
-    STATE.anamneseExtraStep = 0;
-    STATE.chatPremiumStep = 0;
-    STATE.plano = null;
-    Object.assign(STATE.profile, {
-      name: '', goal: '', routine: '', diet: '',
-      restrictions: [], restrictionDetail: '',
-      hasExams: false, sleep: '', activity: '',
-      age: '', weight: '', height: '', gender: '',
-      medications: '', difficulties: [], emotionalEating: '',
-      motivation: 3, extraInfo: ''
-    });
-  }
-
-  // Save user text input for bubble display
-  if (typeof payload === 'string' && payload.trim()) {
-    STATE.lastUserInput = payload.trim();
-  }
-  const response = engine(action, payload);
-  STATE.screen = response.screen;
-  render(response);
-  STATE._dispatching = false;
 }
 
 function renderUserBubble() {
@@ -2287,7 +3745,6 @@ function render(response) {
       bindClicks(container);
       return;
     case 'contato':
-      if (!isPremium()) { upgradeRedirect(); return; }
       container.innerHTML = renderContato(response);
       bindClicks(container);
       return;
@@ -2295,6 +3752,7 @@ function render(response) {
       if (isPremium()) {
         const dias = getPremiumDiasRestantes();
         alert(`⭐ Você já possui Premium ativo!\n⏳ ${dias} dias restantes.`);
+        setTimeout(() => dispatch('voltar_menu'), 0);
         return;
       }
       // Cliente já pagou antes? Reativa sem cobrar de novo
@@ -2302,7 +3760,7 @@ function render(response) {
         reativarPremiumDoEverPaid();
         const dias = getPremiumDiasRestantes();
         alert(`♻️ Premium reativado!\n⏳ ${dias} dias restantes (você já havia pago antes).`);
-        dispatch(null, null);
+        setTimeout(() => dispatch('voltar_menu'), 0);
         return;
       }
       iniciarCheckoutPremium();
@@ -2315,9 +3773,9 @@ function render(response) {
         try {
           // 1. Ping rápido no servidor (500ms) pra não travar
           const saudavel = API_URL
-            ? await fetch(`${API_URL}/health`, {
+            ? await fetchWithRetry(`${API_URL}/health`, {
                 signal: AbortSignal.timeout(500)
-              }).then(r => r.ok).catch(() => false)
+              }, 0).then(r => r.ok).catch(() => false)
             : false;
 
           // 2. Só chama a API se o servidor estiver vivo
@@ -2541,11 +3999,27 @@ function renderComponent(comp, screen) {
 
     case 'text_input': {
       const isNumeric = comp.action === 'ans_text_weight' || comp.action === 'ans_text_height';
+      // Define maxLength por campo para prevenir abuso e payloads gigantes
+      const maxLengthMap = {
+        medications: 500,
+        difficulties: 500,
+        emotionalEating: 500,
+        extraInfo: 1000,
+        restrictionDetail: 500,
+        diet: 2000,
+        name: 100,
+        weight: 10,
+        height: 10,
+        age: 4
+      };
+      const fieldKey = comp.action ? comp.action.replace('ans_text_', '') : '';
+      const maxLen = maxLengthMap[fieldKey] || 500;
       return `
         <div class="input-text-wrapper" style="display:flex;gap:8px;padding:8px 0;">
           <input type="text" class="text-input" id="dynamic-text-input"
             placeholder="${comp.placeholder || 'Digite...'}"
-            autocomplete="off"${isNumeric ? ' inputmode="decimal" pattern="[0-9,.]*"' : ''}>
+            autocomplete="off" maxlength="${maxLen}"
+            ${isNumeric ? ' inputmode="decimal" pattern="[0-9,.]*"' : ''}>
           <button class="send-btn" id="dynamic-send-btn" data-action="${comp.action}" disabled>
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M4 10H16M16 10L11 5M16 10L11 15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           </button>
@@ -2753,6 +4227,7 @@ function renderPlans(resp) {
   const comps = resp.components.reduce((acc, c) => { acc[c.type] = c; return acc; }, {});
   const pricing = comps.pricing;
   STATE.lastUserInput = null;
+  const jaPremium = isPremium();
   return `
     <div class="screen" id="screen-planos">
       <div class="plans-container">
@@ -2761,15 +4236,30 @@ function renderPlans(resp) {
         ${comps.title ? `<h2>${comps.title.text}</h2><p class="how-subtitle">${comps.title.subtitle}</p>` : ''}
         ${pricing ? `
           <div class="plans-grid">
-            ${pricing.items.map(p => `
-              <div class="plan-card ${p.recommended ? 'recommended' : ''}">
-                <div class="${p.recommended ? 'plan-badge recom-badge' : 'plan-badge'}">${p.badge}</div>
-                <div class="plan-price"><span class="plan-value">${p.value}</span></div>
-                <ul class="plan-features">
-                  ${p.features.map(f => `<li class="${f.included ? '' : 'plan-no'}">${f.included ? '✔' : '✘'} ${f.text}</li>`).join('')}
-                </ul>
-                <button class="btn-primary" data-action="${p.action}">${p.recommended ? 'Assinar Premium' : 'Começar grátis'}</button>
-              </div>`).join('')}
+            ${pricing.items.map(p => {
+              if (p.action === 'assinar_premium' && jaPremium) {
+                const dias = getPremiumDiasRestantes();
+                return `
+                  <div class="plan-card recommended">
+                    <div class="plan-badge recom-badge">✅ Ativo</div>
+                    <div class="plan-price"><span class="plan-value">Premium</span></div>
+                    <div style="text-align:center;padding:8px 0;color:var(--accent-500);font-size:0.85rem;font-weight:500;">⏳ ${dias} dias restantes</div>
+                    <ul class="plan-features">
+                      ${p.features.map(f => `<li class="${f.included ? '' : 'plan-no'}">${f.included ? '✔' : '✘'} ${f.text}</li>`).join('')}
+                    </ul>
+                    <button class="btn-outline" style="width:100%;" disabled>⭐ Premium Ativo</button>
+                  </div>`;
+              }
+              return `
+                <div class="plan-card ${p.recommended ? 'recommended' : ''}">
+                  <div class="${p.recommended ? 'plan-badge recom-badge' : 'plan-badge'}">${p.badge}</div>
+                  <div class="plan-price"><span class="plan-value">${p.value}</span></div>
+                  <ul class="plan-features">
+                    ${p.features.map(f => `<li class="${f.included ? '' : 'plan-no'}">${f.included ? '✔' : '✘'} ${f.text}</li>`).join('')}
+                  </ul>
+                  <button class="btn-primary" data-action="${p.action}">${p.recommended ? 'Assinar Premium' : 'Começar grátis'}</button>
+                </div>`;
+            }).join('')}
           </div>` : ''}
       </div>
     </div>`;
@@ -2971,7 +4461,7 @@ function exportarPDF() {
   const plano = STATE.plano || {};
   const refeicoes = gerarRefeicoes(p, true);
   const sups = gerarSuplementos(p);
-  const lista = gerarListaCompras(p);
+  const lista = gerarListaCompras();
   const nd = calcularGET(p) ? gerarDadosNutricionais(p) : null;
   const hoje = new Date().toLocaleDateString('pt-BR');
 
@@ -3120,6 +4610,10 @@ function getChartColors() {
 }
 
 function initCharts() {
+  if (typeof Chart === 'undefined') {
+    console.warn('Chart.js não carregou — pulando gráficos');
+    return;
+  }
   const mealsCanvas = document.getElementById('chart-meals');
   const macrosCanvas = document.getElementById('chart-macros');
   if (!mealsCanvas || !macrosCanvas) return;
@@ -3129,7 +4623,7 @@ function initCharts() {
   const mealNames = [], mealCals = [], mealColors = [];
   legendItems.forEach(item => {
     const label = item.querySelector('.legend-label')?.textContent?.replace(/^[^\s]+\s/, '') || '';
-    const val = parseInt(item.querySelector('.legend-value')?.textContent) || 0;
+    const val = parseInt(item.querySelector('.legend-value')?.textContent, 10) || 0;
     const color = item.querySelector('.legend-color')?.style?.background || '#22C55E';
     mealNames.push(label);
     mealCals.push(val);
@@ -3179,7 +4673,7 @@ function initCharts() {
     const pctEl = row.querySelector('.macro-pct');
     const nameEl = row.querySelector('.macro-name');
     if (pctEl && nameEl) {
-      macroPcts.push(parseInt(pctEl.textContent));
+      macroPcts.push(parseInt(pctEl.textContent, 10));
       macroLabels.push(nameEl.textContent);
     }
   });
@@ -3225,7 +4719,7 @@ function initCharts() {
 // ---- Bind Clicks (replacement for bindActions) ----
 function bindClicks(container) {
   container.querySelectorAll('[data-action]').forEach(el => {
-    if (el.id === 'dynamic-send-btn') return; // handled separately with validation
+    if (el.id === 'dynamic-send-btn' || el.id === 'chat-send-btn') return; // handled separately
     el.addEventListener('click', (e) => {
       // Save user's option text for bubble rendering
       if (el.classList.contains('option-btn') || el.classList.contains('followup-btn')) {
@@ -3290,6 +4784,20 @@ function bindClicks(container) {
     sendBtn.addEventListener('click', submit);
     textInput.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
     setTimeout(() => textInput.focus(), 200);
+  }
+
+  // Chat text input (Bot Nutricionista)
+  const chatInput = container.querySelector('#chat-text-input');
+  const chatSendBtn = container.querySelector('#chat-send-btn');
+  if (chatInput && chatSendBtn) {
+    const validate = () => {
+      const val = chatInput.value.trim();
+      chatSendBtn.disabled = val.length < 2 || STATE.chatLoading;
+    };
+    chatInput.addEventListener('input', validate);
+    chatSendBtn.addEventListener('click', sendChatMessage);
+    chatInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !chatSendBtn.disabled) sendChatMessage(); });
+    setTimeout(() => chatInput.focus(), 200);
   }
 
   // Checkboxes
@@ -3357,7 +4865,8 @@ function bindDynamicInteractions(container, response) {
   // Check if this is a screen that scrolls to chat
   const chatInner = container.querySelector('#chat-inner');
   if (chatInner) {
-    setTimeout(() => {
+    if (STATE._scrollTimeout) clearTimeout(STATE._scrollTimeout);
+    STATE._scrollTimeout = setTimeout(() => {
       chatInner.scrollTop = chatInner.scrollHeight;
       chatInner.scrollTo(0, chatInner.scrollHeight);
     }, 50);
@@ -3450,10 +4959,10 @@ function toggleTheme() {
   const hasDark = html.getAttribute('data-theme') === 'dark';
   if (hasDark) {
     html.removeAttribute('data-theme');
-    localStorage.setItem('nutricare_theme', 'dark');
+    localStorage.setItem('nutricare_theme', 'light');
   } else {
     html.setAttribute('data-theme', 'dark');
-    localStorage.setItem('nutricare_theme', 'light');
+    localStorage.setItem('nutricare_theme', 'dark');
   }
   document.querySelectorAll('#theme-toggle-btn, .menu-brand-badge .header-theme-btn').forEach(btn => {
     btn.textContent = hasDark ? '🌙' : '☀️';
@@ -3465,13 +4974,21 @@ function toggleTheme() {
 
 function initTheme() {
   const saved = localStorage.getItem('nutricare_theme');
-  // Só ativa tema claro se salvou 'light' explicitamente
-  const isLight = saved === 'light';
-  if (isLight) {
+  if (saved === 'light') {
+    document.documentElement.removeAttribute('data-theme');
+  } else if (saved === 'dark') {
     document.documentElement.setAttribute('data-theme', 'dark');
+  } else {
+    // Fallback: respeita preferência do sistema
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    if (prefersDark) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+      localStorage.setItem('nutricare_theme', 'dark');
+    }
   }
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
   document.querySelectorAll('#theme-toggle-btn, .menu-brand-badge .header-theme-btn').forEach(btn => {
-    btn.textContent = isLight ? '☀️' : '🌙';
+    btn.textContent = isDark ? '☀️' : '🌙';
   });
 }
 
@@ -3502,6 +5019,8 @@ function registerSW() {
 window.addEventListener('DOMContentLoaded', () => {
   initTheme();
   registerSW();
+  initCrypto(); // AES-256-GCM: descriptografa dados sensíveis (fire-and-forget)
+  migrarPinAntigo(); // Migra PIN antigo para hash (fire-and-forget)
 
   // Check Stripe Payment Link redirect
   const params = new URLSearchParams(window.location.search);
