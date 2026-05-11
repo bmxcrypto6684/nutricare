@@ -992,7 +992,7 @@ const BOT_CONHECIMENTO = {
   ],
 
   emagrecimento: [
-    { palavras: ['emagrecer', 'perder peso', 'perder barriga', 'emagrecimento', 'dieta', 'calorias', 'déficit', 'perder gordura', 'secar', 'definir'],
+    { palavras: ['emagrecer', 'perder peso', 'perder barriga', 'emagrecimento', 'dieta', 'calorias', 'déficit', 'perder gordura', 'secar', 'definir', 'perder', 'quilos'],
       respostas: [p => {
         const hasImc = parseFloat(p.weight) && parseFloat(p.height);
         const imc = hasImc ? (parseFloat(p.weight) / Math.pow(parseFloat(p.height)/100, 2)).toFixed(1) : null;
@@ -1003,7 +1003,23 @@ const BOT_CONHECIMENTO = {
           `✅ <strong>Beba água</strong> — 35ml por kg de peso = ${parseFloat(p.weight) ? Math.round(parseFloat(p.weight) * 35) + 'ml' : 'calcule 35ml por kg'} por dia<br>` +
           `✅ <strong>Coma devagar</strong> — cada refeição deve durar 15-20 minutos<br><br>` +
           `📌 Lembre-se: emagrecimento saudável é 0,5kg a 1kg por semana. Nada de dietas restritivas!`;
-      }]}
+      }]
+    },
+    // Item específico para "quantos quilos posso perder" (score mais alto que cardapio_semanal)
+    { palavras: ['quantos quilos', 'quantos kg', 'kg por semana', 'quilos por semana', 'perder por semana', 'perder quantos', 'posso perder'],
+      respostas: [p => {
+        const peso = parseFloat(p.weight);
+        return `🎯 <strong>Quantos quilos você pode perder por semana?</strong><br><br>` +
+          `📊 A perda de peso <strong>saudável e sustentável</strong> é de <strong>0,5kg a 1kg por semana</strong>.<br><br>` +
+          `✅ <strong>Por que esse ritmo?</strong><br>` +
+          `• Perder mais que 1kg/semana geralmente é <strong>água e massa magra</strong>, não gordura 💧<br>` +
+          `• Perda muito rápida pode desacelerar o metabolismo 🔄<br>` +
+          `• Ritmo agressivo aumenta risco de efeito sanfona 📉📈<br>` +
+          `• 0,5-1kg/semana = perda de gordura preservando músculo 💪<br><br>` +
+          `${peso ? `📌 <strong>No seu caso (${peso}kg):</strong> em 1 mês saudável = 2 a 4kg. Em 3 meses = 6 a 12kg. 🔥` : ''}<br><br>` +
+          `💡 <strong>Lembre-se:</strong> seu plano alimentar já está ajustado para esse ritmo ideal. O segredo é <strong>consistência</strong>, não pressa!`;
+      }]
+    }
   ],
 
   ganho_massa: [
