@@ -3,13 +3,38 @@
 // Arquitetura: UserInput → dispatch() → Engine(state,data) → JSON Response → Renderer(DOM)
 // ============================================================
 
-// ---- Crypto utilitário (Web Crypto API) ----
+// ---- Crypto utilitário (Web Crypto API + fallback para file://) ----
+function _cryptoOk() {
+  return typeof crypto !== 'undefined' && crypto.subtle && crypto.subtle.digest;
+}
+
+// Fallback: hash iterativo (FNV-1a + rounds) para contextos não-seguros (file://).
+// Não é criptograficamente forte, mas ofusca o PIN contra leitura casual do localStorage.
+function _hashFallback(texto) {
+  let h = 0x811c9dc5; // FNV-1a offset
+  for (let r = 0; r < 1000; r++) {
+    for (let i = 0; i < texto.length; i++) {
+      h ^= texto.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    h ^= r;
+  }
+  // Converte para hex (32-bit → 8 hex chars), repete até ~64 chars para imitar SHA-256
+  let hex = (h >>> 0).toString(16).padStart(8, '0');
+  while (hex.length < 64) hex += hex;
+  return hex.slice(0, 64);
+}
+
 async function hashSHA256(texto) {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(texto);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  if (_cryptoOk()) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(texto);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  // Fallback para file:// ou contextos sem Web Crypto
+  return _hashFallback(texto);
 }
 
 function getChaveAssinatura() {
@@ -25,15 +50,19 @@ function getChaveAssinatura() {
 
 async function assinarHMAC(dados) {
   const chave = getChaveAssinatura();
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw', encoder.encode(chave),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false, ['sign']
-  );
-  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(dados));
-  const sigArray = Array.from(new Uint8Array(signature));
-  return sigArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  if (_cryptoOk()) {
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      'raw', encoder.encode(chave),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false, ['sign']
+    );
+    const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(dados));
+    const sigArray = Array.from(new Uint8Array(signature));
+    return sigArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  // Fallback: hash iterativo com a chave
+  return _hashFallback(chave + ':' + dados);
 }
 
 async function dadosAssinados(valor, dataISO) {
@@ -3397,8 +3426,17 @@ async function salvarPinConfigurado() {
   }
 
   // Armazena hash SHA-256 + salt, nunca o PIN em texto puro
-  const hash = await hashPinSHA256(pin);
-  localStorage.setItem('nutricare_pin_hash', hash);
+  try {
+    const hash = await hashPinSHA256(pin);
+    localStorage.setItem('nutricare_pin_hash', hash);
+  } catch (err) {
+    console.error('Erro ao salvar PIN:', err);
+    erroEl.textContent = 'Erro ao salvar PIN. Tente novamente.';
+    erroEl.style.display = 'block';
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    return;
+  }
   erroEl.style.display = 'none';
   fecharModal();
   setTimeout(() => exibirModalLiberarCliente(), 350);
@@ -3460,7 +3498,17 @@ async function confirmarLiberacao() {
     return;
   }
 
-  const hashDigitado = await hashPinSHA256(pinDigitado);
+  let hashDigitado;
+  try {
+    hashDigitado = await hashPinSHA256(pinDigitado);
+  } catch (err) {
+    console.error('Erro ao verificar PIN:', err);
+    pinErro.textContent = 'Erro ao verificar PIN. Tente novamente.';
+    pinErro.style.display = 'block';
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    return;
+  }
   const pinValido = hashDigitado === pinHash ||
     (/^\d{4,6}$/.test(pinHash) && pinDigitado === pinHash);
 
