@@ -2617,7 +2617,7 @@ function gerarSuplementos(p) {
 // ---- Constants ----
 const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
   ? 'http://localhost:3001/api'
-  : '';
+  : 'https://nutricare-api-iw4j.onrender.com/api';
 
 const ANAMNESE_TOTAL_STEPS = 6; // Perguntas básicas (gratuitas)
 const ANAMNESE_EXTRA_TOTAL = 8; // Perguntas extras (premium)
