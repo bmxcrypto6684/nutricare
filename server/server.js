@@ -204,7 +204,7 @@ const globalLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.path === '/api/stripe-webhook',
-  keyGenerator: (req) => req.headers['x-device-id'] || req.ip
+  keyGenerator: (req) => req.ip
 });
 app.use('/api/', globalLimiter);
 
@@ -415,17 +415,21 @@ app.post('/api/stripe-webhook', async (req, res) => {
     const session = event.data.object;
     const deviceId = session.client_reference_id;
     const email = session.customer_details?.email;
+    const planType = session.metadata?.plan_type || 'premium';
+    const durationDays = parseInt(session.metadata?.duration_days || '30', 10);
 
     if (deviceId) {
       try {
         const user = await db.findOrCreateUser(deviceId, email);
         // activatePremium agora usa upsert com ON CONFLICT(stripe_session_id)
         // Garante idempotência mesmo que Stripe entregue o mesmo evento duas vezes
-        await db.activatePremium(user.id, session.id);
+        await db.activatePremium(user.id, session.id, durationDays);
         logger('INFO', 'webhook', `Premium ativado para device ${deviceId}`, {
           userId: user.id,
           requestId: req.id,
-          sessionId: session.id
+          sessionId: session.id,
+          planType,
+          durationDays
         });
       } catch (err) {
         logger('ERROR', 'webhook', 'Erro ao ativar premium no webhook', {
@@ -456,6 +460,7 @@ app.post('/api/claim-premium', claimPremiumLimiter, async (req, res) => {
 
   try {
     let user = await db.findOrCreateUser(deviceId);
+    let durationDays = 30; // default mensal
 
     // Se sessionId foi fornecido, verifica no Stripe com retry
     if (sessionId && stripe) {
@@ -465,7 +470,9 @@ app.post('/api/claim-premium', claimPremiumLimiter, async (req, res) => {
           { maxRetries: 2, baseDelay: 500, label: 'stripe-retrieve-session' }
         );
         if (session.payment_status === 'paid') {
-          await db.activatePremium(user.id, sessionId);
+          const planType = session.metadata?.plan_type || 'premium';
+          durationDays = parseInt(session.metadata?.duration_days || '30', 10);
+          await db.activatePremium(user.id, sessionId, durationDays);
           const email = session.customer_details?.email;
           if (email && email !== user.email) {
             user = await db.findOrCreateUser(deviceId, email);
@@ -490,7 +497,8 @@ app.post('/api/claim-premium', claimPremiumLimiter, async (req, res) => {
       success: true,
       premium,
       token,
-      expiresAt: premium ? new Date(Date.now() + 30 * 86400000).toISOString() : null
+      durationDays,
+      expiresAt: premium ? new Date(Date.now() + durationDays * 86400000).toISOString() : null
     });
   } catch (err) {
     logger('ERROR', 'claim-premium', 'Erro no servidor', {
@@ -524,7 +532,7 @@ app.get('/api/verify-token', async (req, res) => {
 // ============================================================
 // POST /api/create-checkout-session — Inicia pagamento Stripe
 // ============================================================
-app.post('/api/create-checkout-session', async (req, res) => {
+app.post('/api/create-checkout-session', claimPremiumLimiter, async (req, res) => {
   try {
     if (!stripe) {
       return res.status(503).json({ success: false, error: 'Pagamento indisponível no momento' });
@@ -538,19 +546,30 @@ app.post('/api/create-checkout-session', async (req, res) => {
         price_data: {
           currency: 'brl',
           product_data: { name: 'NutriCare Premium' },
-          unit_amount: 4990, // R$ 49,90
+          unit_amount: 4990, // R$ 49,90 — mensal
+        },
+      };
+    } else if (planType === 'trimestral') {
+      priceData = {
+        price_data: {
+          currency: 'brl',
+          product_data: { name: 'NutriCare Premium Trimestral' },
+          unit_amount: 4900, // R$ 49,00 — trimestral
         },
       };
     } else {
       return res.status(400).json({ success: false, error: 'Tipo de plano inválido' });
     }
 
+    const durationDays = planType === 'trimestral' ? 90 : 30;
+
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
       client_reference_id: deviceId || 'unknown',
       line_items: [{ ...priceData, quantity: 1 }],
-      success_url: `${process.env.BASE_URL || 'http://localhost:3000'}/?premium=success&session_id={CHECKOUT_SESSION_ID}`,
+      metadata: { plan_type: planType, duration_days: String(durationDays) },
+      success_url: `${process.env.BASE_URL || 'http://localhost:3000'}/?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.BASE_URL || 'http://localhost:3000'}/?premium=cancel`,
     });
 
@@ -675,20 +694,12 @@ app.delete('/api/consultations/:id', authMiddleware, async (req, res) => {
 // ============================================================
 app.post('/api/account/delete', authMiddleware, async (req, res) => {
   const userId = req.user.userId;
-  const email = req.body.email;
   if (!userId) {
     return res.status(400).json({ success: false, error: 'userId não encontrado no token' });
   }
   try {
     await db.deleteUserData(userId);
     logger('INFO', 'account-delete', `Dados excluídos para userId ${userId}`);
-    if (email) {
-      const emailUser = await db.findUserByEmail(email);
-      if (emailUser && emailUser.id !== userId) {
-        await db.deleteUserData(emailUser.id);
-        logger('INFO', 'account-delete', `Dados também excluídos para email ${email}`);
-      }
-    }
     res.json({ success: true, message: 'Todos os dados foram excluídos' });
   } catch (err) {
     logger('ERROR', 'account-delete', 'Erro ao excluir dados', { message: err.message });
@@ -725,11 +736,16 @@ app.post('/api/chat', chatLimiter, async (req, res) => {
     // Sistema prompt para o nutricionista
     const systemPrompt =
       'Você é o Bot Nutricionista do app NutriCare, um assistente de nutrição especializado. ' +
-      'Responda de forma amigável, em português brasileiro, com dicas práticas e baseadas em ciência. ' +
-      'Seja breve e direto (máximo 3 parágrafos). ' +
-      'Se perguntarem algo fora de nutrição, diga educadamente que você é especializado em nutrição. ' +
-      'NÃO forneça diagnósticos médicos, receitas complexas, nem prometa resultados milagrosos. ' +
-      'Sempre incentive hábitos saudáveis e sustentáveis.';
+      'Responda SEMPRE em português brasileiro, com informações baseadas em ciência. ' +
+      'Seja objetivo e direto — vá direto ao ponto sem rodeios. ' +
+      'REGRAS DE OURO:\n' +
+      '1. RESPONDA EXATAMENTE O QUE FOI PERGUNTADO. Se perguntarem "quais nutrientes", ' +
+      'LISTE os nutrientes específicos (ex: vitamina C, zinco, selênio) e suas fontes. ' +
+      'Só sugira cardápios/refeições se a pergunta for especificamente sobre "o que comer" ou "cardápio".\n' +
+      '2. Máximo 3 parágrafos. Use tópicos (•) para listas — facilita a leitura no chat.\n' +
+      '3. Se perguntarem algo fora de nutrição/alimentação, diga que você é especializado em nutrição.\n' +
+      '4. NUNCA dê diagnósticos médicos, receitas complexas, nem prometa resultados milagrosos.\n' +
+      '5. Incentive hábitos saudáveis e sustentáveis.';
 
     const chat = geminiModel.startChat({
       history: [
