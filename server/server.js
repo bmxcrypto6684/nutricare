@@ -147,7 +147,7 @@ const JWT_SECRET = process.env.JWT_SECRET || (() => {
 let stripe;
 try {
   const StripeKey = process.env.STRIPE_SECRET_KEY;
-  if (StripeKey && StripeKey !== 'sk_test_placeholder') {
+  if (StripeKey && (StripeKey.startsWith('sk_live_') || StripeKey.startsWith('sk_test_'))) {
     stripe = require('stripe')(StripeKey);
   } else {
     logger('WARN', 'stripe', 'STRIPE_SECRET_KEY não configurada. Pagamentos premium desabilitados.');
@@ -160,6 +160,10 @@ try {
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// ---- Trust Proxy (Render/cloud reverse proxy) ----
+// Sem isso, req.ip retorna IP interno do proxy, quebrando rate limiting
+app.set('trust proxy', 1);
 
 // ---- Gemini AI ----
 let geminiModel = null;
@@ -245,19 +249,29 @@ app.use(cors({ origin: CORS_ORIGINS, methods: ['GET', 'POST', 'DELETE'] }));
 app.use(express.json({ limit: '500kb' }));
 app.use(requestIdMiddleware);
 app.use(trackMetrics);
-app.use(morgan('\x1b[36m:method\x1b[0m :url \x1b[33m:status\x1b[0m \x1b[90m:response-time ms\x1b[0m', {
+// Morgan com URL sanitizada (remove query params para evitar log de PII)
+morgan.token('url-sanitized', (req) => req.path);
+app.use(morgan('\x1b[36m:method\x1b[0m :url-sanitized \x1b[33m:status\x1b[0m \x1b[90m:response-time ms\x1b[0m', {
   skip: (req) => req.path === '/api/health' // Não poluir logs com health check
 }));
 
-// ---- Static Files (apenas raiz, sem expor subdiretórios) ----
-app.use(express.static(path.join(__dirname, '..'), {
-  dotfiles: 'ignore',
-  index: 'index.html'
-}));
-// Bloqueia acesso a arquivos sensíveis
-app.use(['/server/*', '/node_modules/*', '/.claude/*', '/.git/*', '/*.sql', '/*.env*'], (req, res) => {
+// ---- Bloqueia acesso a arquivos sensíveis (ANTES do static) ----
+app.use(['/server/*', '/node_modules/*', '/.claude/*', '/.git/*', '/*.sql', '/*.env*', '/package.json', '/package-lock.json', '/_debug*', '/chart.umd.min.js', '/*.bat', '/README.md'], (req, res) => {
   res.status(403).send('Acesso negado');
 });
+
+// ---- Static Files (apenas index.html, style.css, script.js, sw.js, manifest.json) ----
+app.use(express.static(path.join(__dirname, '..'), {
+  dotfiles: 'ignore',
+  index: 'index.html',
+  setHeaders: (res, filePath) => {
+    // Restringe acesso: só permite arquivos da raiz (não subdiretórios)
+    const relative = path.relative(path.join(__dirname, '..'), filePath);
+    if (relative.includes(path.sep)) {
+      res.status(403).end('Acesso negado');
+    }
+  }
+}));
 
 // ---- Request Log Helper (com PII masking) ----
 function logRequest(title, data, req) {
@@ -1157,20 +1171,5 @@ function gerarInfoNutricional(p) {
 // Iniciar Servidor
 // ============================================================
 app.listen(PORT, () => {
-  console.log('\n' + '='.repeat(48));
-  console.log('  🌿 NutriCare API v2 — Servidor rodando');
-  console.log('='.repeat(48));
-  console.log(`  URL:      http://localhost:${PORT}`);
-  console.log(`  Health:   http://localhost:${PORT}/api/health`);
-  console.log(`  Metrics:  http://localhost:${PORT}/api/metrics`);
-  console.log(`  Database: ${DB_READY ? '✅ Supabase' : '❌ Não configurado'}`);
-  console.log(`  Stripe:   ${stripe ? '✅ Configurado' : '⏳ Aguardando chave'}`);
-  console.log(`  JWT:      ${process.env.JWT_SECRET ? '✅ Configurado' : '⚠️  Modo dev'}`);
-  console.log(`  Gemini:   ${geminiModel ? '✅ Pronto' : '⏳ Aguardando chave'}`);
-  console.log(`  Rate limits:`);
-  console.log(`    Global:   100 req/min`);
-  console.log(`    Consulta:  30 req/min`);
-  console.log(`    Chat:      10 req/min`);
-  console.log(`    Premium:    5 req/min`);
-  console.log('='.repeat(48) + '\n');
+  console.log('NutriCare API v2 iniciada na porta', PORT);
 });

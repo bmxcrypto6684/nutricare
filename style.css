@@ -1727,6 +1727,14 @@ h1 {
   align-items: center;
   justify-content: center;
   gap: 8px;
+  margin-top: 20px;
+}
+
+.premium-modal-separator {
+  border: none;
+  border-top: 1px solid rgba(255,255,255,0.1);
+  margin: 16px 0 0 0;
+  width: 100%;
 }
 .premium-modal-btn:hover {
   opacity: 0.9;

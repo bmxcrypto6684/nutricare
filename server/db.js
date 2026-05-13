@@ -5,17 +5,18 @@ const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+// service_role bypassa Row Level Security — preferir SUPABASE_ANON_KEY se RLS estiver configurado
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  console.error('\n❌ SUPABASE_URL e SUPABASE_SERVICE_KEY são obrigatórios.');
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  console.error('\n❌ SUPABASE_URL e SUPABASE_KEY são obrigatórios.');
   console.error('   Crie um projeto em https://supabase.com/dashboard');
   console.error('   E configure as variáveis no Render Dashboard.\n');
   module.exports = { _dbUnconfigured: true };
   return;
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
   realtime: { transport: ws }
 });

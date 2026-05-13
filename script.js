@@ -1822,15 +1822,12 @@ const BOT_PERGUNTAS = [
   }
 ];
 
-// ---- Escape HTML para evitar XSS ----
+// ---- Sanitização HTML (DOM-based, segura contra XSS) ----
 function escapeHtml(str) {
-  if (typeof str !== 'string') return str;
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
+  if (!str) return '';
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
 }
 
 // ---- Sanitiza perfil do usuário para uso em respostas HTML ----
@@ -2758,14 +2755,6 @@ function devLog(...args) {
   if (IS_DEV) console.log(...args);
 }
 
-// ---- Sanitização HTML ----
-function escapeHtml(str) {
-  if (!str) return '';
-  const d = document.createElement('div');
-  d.textContent = str;
-  return d.innerHTML;
-}
-
 // ---- Histórico e Progresso (localStorage) ----
 const STORAGE_KEY_HISTORICO = 'nutricare_historico';
 const STORAGE_KEY_PROGRESSO = 'nutricare_progresso';
@@ -2801,7 +2790,7 @@ function salvarConsulta() {
       }
     }
   } catch (e) {
-    console.warn('Erro ao salvar histórico:', e);
+    devLog('Erro ao salvar histórico:', e);
   }
 }
 
@@ -2834,8 +2823,26 @@ async function removerRegistroHistorico(id) {
 }
 
 function carregarProgresso() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY_PROGRESSO) || '[]'); }
-  catch { return []; }
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PROGRESSO);
+    if (!raw) return [];
+    if (raw.startsWith('enc:')) {
+      // Dados encriptados — retorna cache ou array vazio (decrypt é async)
+      const cached = _decryptedCache[STORAGE_KEY_PROGRESSO];
+      if (Array.isArray(cached)) return cached;
+      // Dispara decrypt assíncrono e retorna vazio (será populado na próxima chamada)
+      _aesDecrypt(raw).then(plain => {
+        if (plain) {
+          const arr = JSON.parse(plain);
+          _decryptedCache[STORAGE_KEY_PROGRESSO] = arr;
+        }
+      }).catch(() => {});
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    _decryptedCache[STORAGE_KEY_PROGRESSO] = parsed;
+    return parsed;
+  } catch { return []; }
 }
 
 function removerRegistroProgresso(timestamp) {
@@ -3339,6 +3346,8 @@ function exibirModalLiberarCliente() {
         <input class="premium-modal-input" id="mc-pin" type="password" placeholder="Digite seu PIN profissional" maxlength="6" inputmode="numeric" autocomplete="off" />
         <span class="premium-modal-helper" id="mc-pin-erro" style="color:#EF4444;display:none;">PIN incorreto. Tente novamente.</span>
 
+        <hr class="premium-modal-separator" />
+
         <button class="premium-modal-btn" id="mc-confirmar-btn" onclick="confirmarLiberacao()">
           <span class="btn-icon">⭐</span>
           <span class="btn-text">Liberar Premium (30 dias)</span>
@@ -3373,11 +3382,13 @@ function exibirModalConfigurarPin() {
         <input class="premium-modal-input" id="mc-novo-pin" type="password" placeholder="Ex: 1234" maxlength="6" inputmode="numeric" autocomplete="off" />
         <span class="premium-modal-helper">Use apenas números</span>
 
-        <label class="premium-modal-label" style="margin-top:12px;">Confirme o PIN</label>
+        <label class="premium-modal-label" style="margin-top:20px;">Confirme o PIN</label>
         <input class="premium-modal-input" id="mc-confirmar-pin" type="password" placeholder="Repita o PIN" maxlength="6" inputmode="numeric" autocomplete="off" />
         <span class="premium-modal-helper" id="mc-pin-setup-erro" style="color:#EF4444;display:none;"></span>
 
-        <button class="premium-modal-btn" id="mc-confirmar-btn" onclick="salvarPinConfigurado()">
+        <hr class="premium-modal-separator" />
+
+        <button class="premium-modal-btn" id="mc-confirmar-btn" onclick="salvarPinConfigurado()" style="margin-top:24px;">
           <span class="btn-text">Salvar PIN</span>
           <span class="spinner"></span>
         </button>
@@ -3636,8 +3647,8 @@ function renderChatPremium(resp) {
     }
     bubblesHtml += `<div style="display:flex;flex-direction:column;gap:8px;">`;
     catData.perguntas.forEach((q, i) => {
-      const safeQ = q.replace(/'/g, "\\'");
-      bubblesHtml += `<button class="option-btn" onclick="handleQuestionClick('${safeQ}')">${q}</button>`;
+      const safeQ = q.replace(/&/g, '&amp;').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      bubblesHtml += `<button class="option-btn" onclick="handleQuestionClick('${safeQ}')">${escapeHtml(q)}</button>`;
     });
     bubblesHtml += `</div></div>`;
   }
@@ -3702,7 +3713,7 @@ function dispatch(action, payload) {
     // Aplica transição de tela baseada na ação
     if (action && ACTION_ROUTES[action]) {
       STATE.screen = ACTION_ROUTES[action];
-      console.log(`   → Tela: ${STATE.screen}`);
+      devLog(`   → Tela: ${STATE.screen}`);
     }
 
     // Liberar entrada do cliente — abre modal profissional
@@ -3839,7 +3850,7 @@ function render(response) {
       container.innerHTML = renderAnaliseLoader();
       startLoaderAnimation();
       setTimeout(async () => {
-        console.log('⏳ [NutriCare] Iniciando análise dos dados...');
+        devLog('⏳ [NutriCare] Iniciando análise dos dados...');
         try {
           // 1. Ping rápido no servidor (500ms) pra não travar
           const saudavel = API_URL
@@ -3856,16 +3867,16 @@ function render(response) {
               new Promise(r => setTimeout(() => r(null), 5000))
             ]);
           } else {
-            console.log('💻 [NutriCare] Servidor offline, gerando localmente');
+            devLog('💻 [NutriCare] Servidor offline, gerando localmente');
           }
 
           if (result && result.success) {
             STATE.plano = result.data;
             STATE.lastDiagnostico = (result.data.diagnostico?.resumo || []).join(' · ') || STATE.profile.goal || '';
             STATE.lastPlano = true;
-            console.log('📊 [NutriCare] Plano carregado do backend');
+            devLog('📊 [NutriCare] Plano carregado do backend');
           } else {
-            console.log('💻 [NutriCare] Usando geração local (fallback)');
+            devLog('💻 [NutriCare] Usando geração local (fallback)');
           }
         } catch (err) {
           console.error('❌ [NutriCare] Erro inesperado na análise:', err);
@@ -5068,14 +5079,14 @@ function initTheme() {
 function registerSW() {
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').then(reg => {
-      console.log('📦 [PWA] Service Worker registrado:', reg.scope);
+      devLog('📦 [PWA] Service Worker registrado:', reg.scope);
       // Força atualização quando detectar novo SW
       reg.onupdatefound = () => {
         const installing = reg.installing;
         if (installing) {
           installing.onstatechange = () => {
             if (installing.state === 'installed' && navigator.serviceWorker.controller) {
-              console.log('🆕 [PWA] Novo SW detectado — recarregando...');
+              devLog('🆕 [PWA] Novo SW detectado — recarregando...');
               window.location.reload();
             }
           };
