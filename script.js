@@ -86,30 +86,6 @@ async function hashPinSHA256(pin) {
   return hashSHA256(pin + ':' + salt);
 }
 
-// ---- Assinatura síncrona para premium (previne tampering casual via DevTools) ----
-function getVerifyChallenge() {
-  let c = localStorage.getItem('nutricare_verify_challenge');
-  if (!c) {
-    c = Array.from({ length: 32 }, () => Math.random().toString(36).charAt(2)).join('');
-    localStorage.setItem('nutricare_verify_challenge', c);
-  }
-  return c;
-}
-
-function provarPremium(dataISO) {
-  const c = getVerifyChallenge();
-  let h = 0;
-  const s = c + ':' + dataISO;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) - h) + s.charCodeAt(i);
-    h = h | 0;
-  }
-  return Math.abs(h).toString(36);
-}
-
-function verificarPremium(dataISO, proof) {
-  return proof === provarPremium(dataISO);
-}
 
 // ---- AES-GCM localStorage Encryption (Web Crypto API) ----
 // Protege dados sensíveis (saúde, PII) com criptografia autenticada AES-256-GCM.
@@ -142,6 +118,7 @@ function _abrirCryptoDB() {
 }
 
 async function _gerarAESKey() {
+  if (!_cryptoOk()) return null;
   return crypto.subtle.generateKey(
     { name: 'AES-GCM', length: 256 },
     true, ['encrypt', 'decrypt']
@@ -149,11 +126,13 @@ async function _gerarAESKey() {
 }
 
 async function _exportarRawKey(key) {
+  if (!_cryptoOk() || !key) return null;
   const raw = await crypto.subtle.exportKey('raw', key);
   return new Uint8Array(raw);
 }
 
 async function _importarRawKey(raw) {
+  if (!_cryptoOk() || !raw) return null;
   return crypto.subtle.importKey(
     'raw', raw,
     { name: 'AES-GCM', length: 256 },
@@ -163,6 +142,7 @@ async function _importarRawKey(raw) {
 
 async function _initAESKey() {
   if (_aesKeyCache) return _aesKeyCache;
+  if (!_cryptoOk()) return null;
   const db = await _abrirCryptoDB();
   if (!db) return null;
   try {
@@ -199,8 +179,9 @@ async function _initAESKey() {
 
 async function _aesEncrypt(plaintext) {
   if (!plaintext) return plaintext;
+  if (!_cryptoOk()) return null;
   const key = await _initAESKey();
-  if (!key) return plaintext;
+  if (!key) return null;
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encoded = new TextEncoder().encode(plaintext);
   const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
@@ -214,6 +195,7 @@ async function _aesDecrypt(ciphertext) {
   if (!ciphertext || typeof ciphertext !== 'string' || !ciphertext.startsWith('enc:')) {
     return ciphertext;
   }
+  if (!_cryptoOk()) return null;
   const key = await _initAESKey();
   if (!key) return null;
   try {
@@ -228,16 +210,21 @@ async function _aesDecrypt(ciphertext) {
 }
 
 // Criptografa dado sensível no localStorage (fire-and-forget após salvar)
+// Retorna true se conseguiu criptografar, false se crypto indisponível
 async function _encryptStorageKey(key) {
   try {
+    if (!_cryptoOk()) return false;
     const raw = localStorage.getItem(key);
-    if (!raw || raw.startsWith('enc:')) return;
+    if (!raw || raw.startsWith('enc:')) return true;
     const encrypted = await _aesEncrypt(raw);
-    if (encrypted !== raw) localStorage.setItem(key, encrypted);
-    // Atualiza cache síncrono
-    const parsed = JSON.parse(raw);
-    _decryptedCache[key] = Array.isArray(parsed) ? parsed : parsed;
-  } catch {}
+    if (encrypted && encrypted !== raw) {
+      localStorage.setItem(key, encrypted);
+      const parsed = JSON.parse(raw);
+      _decryptedCache[key] = Array.isArray(parsed) ? parsed : parsed;
+      return true;
+    }
+    return false;
+  } catch { return false; }
 }
 
 // Descriptografa dado sensível do localStorage, retorna e popula cache
@@ -381,7 +368,7 @@ function engine(action, payload) {
               action: 'iniciar_consulta'
             },
             {
-              badge: 'Recomendado', value: 'Premium', recommended: true,
+              badge: 'Recomendado', value: 'Premium 3M', recommended: true,
               features: [
                 { text: 'Consulta completa', included: true },
                 { text: 'Plano alimentar personalizado', included: true },
@@ -389,7 +376,7 @@ function engine(action, payload) {
                 { text: 'Acompanhamento contínuo', included: true },
                 { text: 'Suporte por chat', included: true }
               ],
-              action: 'assinar_premium'
+              action: 'assinar_trimestral'
             }
           ]}
         ],
@@ -397,6 +384,7 @@ function engine(action, payload) {
           { id: 'voltar_menu', next: 'onboarding' },
           { id: 'iniciar_consulta', next: 'anamnese_step' },
           { id: 'assinar_premium', next: 'assinar_premium' },
+          { id: 'assinar_trimestral', next: 'assinar_trimestral' },
           { id: 'falar_contato', next: 'contato' }
         ]
       };
@@ -777,6 +765,8 @@ function engine(action, payload) {
 
     case 'assinar_premium':
       return { screen: 'assinar_premium', message: '', components: [], actions: [] };
+    case 'assinar_trimestral':
+      return { screen: 'assinar_trimestral', message: '', components: [], actions: [] };
 
     default:
       console.error('Tela desconhecida:', STATE.screen);
@@ -1150,7 +1140,7 @@ const BOT_CONHECIMENTO = {
   ],
 
   proteinas: [
-    { palavras: ['proteína', 'proteina', 'whey', 'whey protein', 'suplemento', 'suplementação', 'aminoácidos', 'aminoacidos', 'creatina'],
+    { palavras: ['proteína', 'proteina', 'aminoácidos', 'aminoacidos'],
       respostas: [
         p => `🥩 <strong>Proteínas na alimentação:</strong><br><br>` +
         `📌 Fontes de proteína magra:<br>` +
@@ -1482,14 +1472,16 @@ const BOT_CONHECIMENTO = {
           `• <strong>Ferro</strong> — feijão, lentilha, carne magra, couve 🫘<br><br>` +
           `💤 <strong>Não esqueça:</strong> sono de qualidade ≥7h é ESSENCIAL para imunidade!<br><br>` +
           `📌 Uma alimentação colorida (5+ cores por dia) garante variedade de nutrientes!`,
-        p => `⚡ <strong>Imunidade alta o ano inteiro:</strong><br><br>` +
-          `🥗 <strong>Monte um prato imunoprotetor:</strong><br>` +
-          `• Café da manhã: aveia + frutas vermelhas + castanhas 🥣<br>` +
-          `• Almoço: salada colorida + proteína + legumes 🥬<br>` +
-          `• Lanche: iogurte natural + mel + chia 🥛<br>` +
-          `• Jantar: sopa de legumes com frango 🥣<br><br>` +
-          `🚰 Hidratação adequada também é fundamental — as mucosas secas são porta de entrada para vírus!<br><br>` +
-          `🧘 <strong>E não subestime:</strong> estresse crônico reduz a imunidade. Exercício físico e lazer ajudam!`
+        p => `🛡️ <strong>Como fortalecer seu sistema imune com alimentos:</strong><br><br>` +
+          `🔬 <strong>Cada nutriente tem um papel específico:</strong><br>` +
+          `• <strong>Vitamina C</strong> — aumenta produção de glóbulos brancos. Fontes: acerola, laranja, kiwi, pimentão 🍊<br>` +
+          `• <strong>Vitamina D</strong> — modula resposta imune. Fontes: sol (15min/dia), salmão, ovos, cogumelos ☀️<br>` +
+          `• <strong>Zinco</strong> — maturação das células de defesa. Fontes: ostras, carne, castanha de caju 🥩<br>` +
+          `• <strong>Selênio</strong> — potente antioxidante. Fontes: 1 castanha-do-pará/dia já basta! 🥜<br>` +
+          `• <strong>Ômega-3</strong> — ação anti-inflamatória. Fontes: sardinha, atum, chia, linhaça 🐟<br>` +
+          `• <strong>Ferro</strong> — transporte de oxigênio para células imunes. Fontes: feijão, lentilha, couve 🫘<br><br>` +
+          `💡 <strong>Dica prática:</strong> prato colorido (3+ cores) = variedade de nutrientes imunoprotetores naturalmente!<br><br>` +
+          `🧘 <strong>Fatores além da dieta:</strong> sono ≥7h, exercício moderado e controle do estresse são tão importantes quanto a alimentação.`
       ]}
   ],
 
@@ -3045,6 +3037,7 @@ const ACTION_ROUTES = {
   'agendar': 'agendar',
   'duvidas': 'duvidas',
   'assinar_premium': 'assinar_premium',
+  'assinar_trimestral': 'assinar_trimestral',
   'liberar_cliente': 'onboarding',
   'sair_premium': 'onboarding'
 };
@@ -3106,32 +3099,42 @@ async function sendToBackend(profile) {
 }
 
 // ---- Premium / Stripe Payment Link ----
-const PREMIUM_LINK = 'https://buy.stripe.com/test_eVqbIU4PL0uD6Nf8MY8EM00';
+// Payment Link de produção — fallback caso API offline
+const PREMIUM_LINK_FALLBACK = 'https://buy.stripe.com/4gM5kEglIh1g0yg7tG2VG00';
 
-function iniciarCheckoutPremium() {
-  window.location.href = PREMIUM_LINK;
-}
-
-function verificarPremiumSucesso() {
-  const jaEraPremium = localStorage.getItem('nutricare_premium') === 'true';
-  if (!jaEraPremium) {
-    const agora = new Date().toISOString();
-    salvarPremiumMultiStorage(agora);
-    salvarEverPaid(agora);
+async function iniciarCheckoutPremium(planType = 'premium') {
+  try {
+    const deviceId = getPremiumDeviceId();
+    const res = await fetchWithRetry(`${API_URL}/create-checkout-session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ planType, deviceId })
+    }, 1);
+    if (res && res.ok) {
+      const data = await res.json();
+      if (data.success && data.url) {
+        window.location.href = data.url;
+        return;
+      }
+    }
+  } catch (e) {
+    console.warn('API de checkout indisponível, usando fallback:', e.message);
   }
-  return true;
+  // Fallback: link estático se API offline
+  window.location.href = PREMIUM_LINK_FALLBACK;
 }
 
-function renderPremiumAtivado(email) {
+function renderPremiumAtivado(email, durationDays = 30) {
   const container = document.getElementById('screen-container');
+  const planoNome = durationDays >= 90 ? 'Trimestral' : 'Premium';
   container.innerHTML = `
     <div class="screen" style="display:flex;align-items:center;justify-content:center;padding:40px;background:var(--bg-deep);">
       <div style="text-align:center;max-width:360px;animation:slideUp 0.5s ease;">
         <div style="font-size:4rem;margin-bottom:16px;animation:pulse 2s ease-in-out infinite;">🎉</div>
-        <h1 style="font-size:1.6rem;margin-bottom:8px;">Premium Ativado!</h1>
+        <h1 style="font-size:1.6rem;margin-bottom:8px;">${planoNome} Ativado!</h1>
         <p style="color:var(--text-secondary);font-size:0.9rem;line-height:1.7;margin-bottom:20px;">
           Agora você tem acesso a todos os recursos premium do NutriCare.<br>
-          <span style="color:var(--accent-500);font-weight:600;">✅ Válido por 30 dias</span>
+          <span style="color:var(--accent-500);font-weight:600;">✅ Válido por ${durationDays} dias</span>
           ${email ? `<br><span style="color:var(--text-tertiary);font-size:0.8rem;">Confirmação enviada para ${email}</span>` : ''}
         </p>
         <div style="display:flex;flex-direction:column;gap:10px;">
@@ -3171,44 +3174,39 @@ function getPremiumDeviceId() {
   return id;
 }
 
-// Salva sessão premium ATIVA com assinatura criptográfica
-function salvarPremiumMultiStorage(dataAtivacaoISO) {
-  const proof = provarPremium(dataAtivacaoISO);
+// Salva sessão premium ATIVA com JWT (server-side verification)
+// expiresAtISO: data de expiração (30 dias após pagamento, ou 30 dias para PIN profissional)
+// token: JWT opcional (presente quando verificado via Stripe)
+function salvarPremiumMultiStorage(expiresAtISO, token) {
   localStorage.setItem('nutricare_premium', 'true');
-  localStorage.setItem('nutricare_premium_date', dataAtivacaoISO);
-  localStorage.setItem('nutricare_premium_proof', proof);
-  const payload = JSON.stringify({ date: dataAtivacaoISO, device: getPremiumDeviceId(), proof });
+  localStorage.setItem('nutricare_premium_expires', expiresAtISO);
+  if (token) {
+    localStorage.setItem('nutricare_premium_token', token);
+  }
+  const payload = JSON.stringify({ expires: expiresAtISO, t: token || '' });
   setPremiumCookie(payload, 365);
   broadcastSync('premium_changed', { status: 'activated' });
 }
 
-// Salva registro PERMANENTE com assinatura
+// Salva registro PERMANENTE de que o usuário já pagou (previne re-cobrança)
 function salvarEverPaid(dataAtivacaoISO) {
-  const proof = provarPremium(dataAtivacaoISO);
   localStorage.setItem('nutricare_ever_paid', 'true');
   localStorage.setItem('nutricare_ever_paid_date', dataAtivacaoISO);
-  localStorage.setItem('nutricare_ever_paid_proof', proof);
-  const payload = JSON.stringify({ date: dataAtivacaoISO, device: getPremiumDeviceId(), proof });
+  const payload = JSON.stringify({ date: dataAtivacaoISO, device: getPremiumDeviceId() });
   broadcastSync('premium_changed', { status: 'ever_paid' });
   setEverPaidCookie(payload, 365 * 5);
 }
 
 function temEverPaid() {
-  // Verifica localStorage com proof
-  if (localStorage.getItem('nutricare_ever_paid') === 'true') {
-    const dataStr = localStorage.getItem('nutricare_ever_paid_date');
-    const proof = localStorage.getItem('nutricare_ever_paid_proof');
-    if (dataStr && proof && verificarPremium(dataStr, proof)) return true;
-  }
+  if (localStorage.getItem('nutricare_ever_paid') === 'true') return true;
   // Verifica cookie
   const match = document.cookie.match(/(?:^|;\s*)nutricare_ever_paid=([^;]*)/);
   if (match) {
     try {
       const data = JSON.parse(decodeURIComponent(match[1]));
-      if (data && data.date && data.proof && verificarPremium(data.date, data.proof)) {
+      if (data && data.date) {
         localStorage.setItem('nutricare_ever_paid', 'true');
         localStorage.setItem('nutricare_ever_paid_date', data.date);
-        localStorage.setItem('nutricare_ever_paid_proof', data.proof);
         return true;
       }
     } catch (e) {}
@@ -3218,8 +3216,8 @@ function temEverPaid() {
 
 function limparPremiumMultiStorage() {
   localStorage.removeItem('nutricare_premium');
-  localStorage.removeItem('nutricare_premium_date');
-  localStorage.removeItem('nutricare_premium_proof');
+  localStorage.removeItem('nutricare_premium_expires');
+  localStorage.removeItem('nutricare_premium_token');
   deletePremiumCookie();
   broadcastSync('premium_changed', { status: 'removed' });
 }
@@ -3229,11 +3227,10 @@ function recuperarPremiumCookie() {
   if (!raw) return false;
   try {
     const data = JSON.parse(raw);
-    if (data && data.date && data.proof && verificarPremium(data.date, data.proof)) {
+    if (data && data.expires) {
       localStorage.setItem('nutricare_premium', 'true');
-      localStorage.setItem('nutricare_premium_date', data.date);
-      localStorage.setItem('nutricare_premium_proof', data.proof);
-      if (data.device) localStorage.setItem('nutricare_device_id', data.device);
+      localStorage.setItem('nutricare_premium_expires', data.expires);
+      if (data.t) localStorage.setItem('nutricare_premium_token', data.t);
       return true;
     }
   } catch (e) {}
@@ -3241,18 +3238,18 @@ function recuperarPremiumCookie() {
 }
 
 function getPremiumDiasRestantes() {
-  let dataStr = localStorage.getItem('nutricare_premium_date');
-  if (!dataStr) {
+  let expiresStr = localStorage.getItem('nutricare_premium_expires');
+  if (!expiresStr) {
     if (recuperarPremiumCookie()) {
-      dataStr = localStorage.getItem('nutricare_premium_date');
+      expiresStr = localStorage.getItem('nutricare_premium_expires');
     }
   }
-  if (!dataStr) return 0;
-  const dataAtivacao = new Date(dataStr);
+  if (!expiresStr) return 0;
+  const expiracao = new Date(expiresStr);
+  if (isNaN(expiracao.getTime())) return 0;
   const agora = new Date();
-  const diffMs = agora - dataAtivacao;
-  const diffDias = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-  return Math.max(0, 30 - diffDias);
+  const diffMs = expiracao - agora;
+  return Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
 }
 
 function getEverPaidDiasRestantes() {
@@ -3269,8 +3266,9 @@ function getEverPaidDiasRestantes() {
 function reativarPremiumDoEverPaid() {
   const dataStr = localStorage.getItem('nutricare_ever_paid_date');
   if (!dataStr) return false;
-  // Reativa premium usando a data original
-  salvarPremiumMultiStorage(dataStr);
+  // Reativa premium por 30 dias a partir de agora
+  const expiracao = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  salvarPremiumMultiStorage(expiracao);
   return true;
 }
 
@@ -3283,10 +3281,9 @@ function isPremium() {
   }
   if (val !== 'true') return false;
 
-  // Verifica assinatura criptográfica (previne tampering via DevTools)
-  const dataStr = localStorage.getItem('nutricare_premium_date');
-  const proof = localStorage.getItem('nutricare_premium_proof');
-  if (!dataStr || !proof || !verificarPremium(dataStr, proof)) {
+  // Verifica expiração via data salva (server-side: JWT ou PIN profissional)
+  const expiresStr = localStorage.getItem('nutricare_premium_expires');
+  if (!expiresStr) {
     limparPremiumMultiStorage();
     return false;
   }
@@ -3530,7 +3527,7 @@ async function confirmarLiberacao() {
   const dataExpiracao = new Date(dataAtivacao.getTime() + tempo * 24 * 60 * 60 * 1000);
 
   // Ativa premium (localStorage + cookie)
-  salvarPremiumMultiStorage(dataAtivacao.toISOString());
+  salvarPremiumMultiStorage(dataExpiracao.toISOString());
   salvarEverPaid(dataAtivacao.toISOString());
 
   // Salva dados do cliente
@@ -3827,7 +3824,16 @@ function render(response) {
         setTimeout(() => dispatch('voltar_menu'), 0);
         return;
       }
-      iniciarCheckoutPremium();
+      iniciarCheckoutPremium('premium');
+      return;
+    case 'assinar_trimestral':
+      if (isPremium()) {
+        const dias = getPremiumDiasRestantes();
+        alert(`⭐ Você já possui Premium ativo!\n⏳ ${dias} dias restantes.`);
+        setTimeout(() => dispatch('voltar_menu'), 0);
+        return;
+      }
+      iniciarCheckoutPremium('trimestral');
       return;
     case 'analise_loading':
       container.innerHTML = renderAnaliseLoader();
@@ -4037,7 +4043,7 @@ function renderComponent(comp, screen) {
           <ul class="plan-features">
             ${p.features.map(f => `<li class="${f.included ? '' : 'plan-no'}">${f.included ? '✔' : '✘'} ${f.text}</li>`).join('')}
           </ul>
-          <button class="btn-primary" data-action="${p.action}">${p.recommended ? 'Assinar Premium' : 'Começar grátis'}</button>
+          <button class="btn-primary" data-action="${p.action}">${p.action === 'assinar_premium' ? 'Assinar Premium' : p.action === 'assinar_trimestral' ? 'Assinar Trimestral' : 'Começar grátis'}</button>
         </div>`).join('')}</div>`;
 
     case 'contact_card':
@@ -4301,12 +4307,13 @@ function renderPlans(resp) {
         ${pricing ? `
           <div class="plans-grid">
             ${pricing.items.map(p => {
-              if (p.action === 'assinar_premium' && jaPremium) {
+
+              if (p.action === 'assinar_trimestral' && jaPremium) {
                 const dias = getPremiumDiasRestantes();
                 return `
                   <div class="plan-card recommended">
                     <div class="plan-badge recom-badge">✅ Ativo</div>
-                    <div class="plan-price"><span class="plan-value">Premium</span></div>
+                    <div class="plan-price"><span class="plan-value">${p.value}</span></div>
                     <div style="text-align:center;padding:8px 0;color:var(--accent-500);font-size:0.85rem;font-weight:500;">⏳ ${dias} dias restantes</div>
                     <ul class="plan-features">
                       ${p.features.map(f => `<li class="${f.included ? '' : 'plan-no'}">${f.included ? '✔' : '✘'} ${f.text}</li>`).join('')}
@@ -4314,6 +4321,7 @@ function renderPlans(resp) {
                     <button class="btn-outline" style="width:100%;" disabled>⭐ Premium Ativo</button>
                   </div>`;
               }
+              const btnLabel = p.action === 'assinar_trimestral' ? 'Assinar Trimestral' : 'Começar grátis';
               return `
                 <div class="plan-card ${p.recommended ? 'recommended' : ''}">
                   <div class="${p.recommended ? 'plan-badge recom-badge' : 'plan-badge'}">${p.badge}</div>
@@ -4321,7 +4329,7 @@ function renderPlans(resp) {
                   <ul class="plan-features">
                     ${p.features.map(f => `<li class="${f.included ? '' : 'plan-no'}">${f.included ? '✔' : '✘'} ${f.text}</li>`).join('')}
                   </ul>
-                  <button class="btn-primary" data-action="${p.action}">${p.recommended ? 'Assinar Premium' : 'Começar grátis'}</button>
+                  <button class="btn-primary" data-action="${p.action}">${btnLabel}</button>
                 </div>`;
             }).join('')}
           </div>` : ''}
@@ -5089,6 +5097,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // Check Stripe Payment Link redirect
   const params = new URLSearchParams(window.location.search);
   const premiumStatus = params.get('premium');
+  const sessionId = params.get('session_id');
 
   if (premiumStatus === 'clear') {
     limparPremiumMultiStorage();
@@ -5101,16 +5110,33 @@ window.addEventListener('DOMContentLoaded', () => {
     return;
   }
 
-  if (premiumStatus === 'success') {
-    // Limpa URL sem recarregar
+  if (sessionId) {
+    // Verifica pagamento via servidor (substitui o antigo ?premium=success bypass)
     window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
-    // Aguarda loading + ativa premium
     setTimeout(async () => {
       const loading = $c('loading-screen');
       if (loading) loading.classList.add('hidden');
+      try {
+        const deviceId = getPremiumDeviceId();
+        const res = await fetchWithRetry(`${API_URL}/claim-premium`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceId, sessionId })
+        }, 1);
+        if (res && res.ok) {
+          const data = await res.json();
+          if (data.success && data.premium) {
+            salvarPremiumMultiStorage(data.expiresAt, data.token);
+            salvarEverPaid(data.expiresAt);
+            renderPremiumAtivado('', data.durationDays || 30);
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn('Erro ao verificar pagamento:', e.message);
+      }
+      // Fallback: se servidor offline, mostra tela de upgrade
       dispatch(null, null);
-      verificarPremiumSucesso();
-      renderPremiumAtivado('');
     }, 1400);
     return;
   }
