@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#07070D"/>
+      <stop offset="100%" style="stop-color:#0D0D1A"/>
+    </linearGradient>
+  </defs>
+  <rect width="192" height="192" rx="32" fill="url(#bg)"/>
+  <circle cx="96" cy="96" r="80" fill="none" stroke="rgba(0,214,143,0.3)" stroke-width="6"/>
+  <path d="M64 112C64 112 80 96 96 112C112 96 128 112 128 112" fill="none" stroke="#00D68F" stroke-width="7" stroke-linecap="round"/>
+  <path d="M72 74 L78 86 M96 68 L96 84 M120 74 L114 86" fill="none" stroke="#00D68F" stroke-width="6" stroke-linecap="round"/>
+  <text x="96" y="150" text-anchor="middle" font-family="sans-serif" font-size="18" font-weight="bold" fill="rgba(0,214,143,0.5)">NutriCare</text>
+</svg>

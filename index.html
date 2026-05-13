@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' http://localhost:* https:">
+    <title>NutriCare - Consulta Nutricional</title>
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#07070D">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="NutriCare">
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" type="image/svg+xml" href="icons/icon-192.svg">
+    <link rel="apple-touch-icon" href="icons/icon-192.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script>
+    // Força limpeza do Service Worker antigo pra não servir script.js em cache
+    if ('serviceWorker' in navigator && !sessionStorage.getItem('sw_cleaned')) {
+      sessionStorage.setItem('sw_cleaned', '1');
+      navigator.serviceWorker.getRegistrations().then(regs => {
+        if (regs.length > 0) {
+          Promise.all(regs.map(r => r.unregister())).then(() => {
+            localStorage.removeItem('nutricare_script_version');
+            window.location.reload();
+          });
+        }
+      });
+    }
+    </script>
+</head>
+<body>
+    <div id="app">
+
+        <!-- Loading -->
+        <div id="loading-screen" class="screen">
+            <div class="loading-content">
+                <div class="loading-logo">
+                    <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                        <circle cx="24" cy="24" r="22" stroke="#00D68F" stroke-width="3"/>
+                        <path d="M16 28C16 28 20 24 24 28C28 24 32 28 32 28" stroke="#00D68F" stroke-width="2.5" stroke-linecap="round"/>
+                        <path d="M18 20L18 22" stroke="#00D68F" stroke-width="2.5" stroke-linecap="round"/>
+                        <path d="M30 20L30 22" stroke="#00D68F" stroke-width="2.5" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <div class="loading-bar"><div class="loading-fill"></div></div>
+                <p class="loading-text">Preparando sua consulta...</p>
+            </div>
+        </div>
+
+        <!-- ====== RENDER CONTAINER ====== -->
+        <!--
+            Toda tela é renderizada dentro de #screen-container
+            conforme o JSON vindo do NutritionistEngine.
+            Exceção: telas fixas (loading).
+        -->
+        <div id="screen-container"></div>
+
+    </div>
+    <script src="script.js?v=15"></script>
+</body>
+</html>
